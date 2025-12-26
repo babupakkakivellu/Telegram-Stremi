@@ -102,14 +102,6 @@ def get_readable_time(seconds: int) -> str:
     return readable_time
 
 
-def extract_tmdb_id(url):
-    # Match IMDb URLs
-    imdb_match = re.search(r'/title/(tt\d+)', url)
-    if imdb_match:
-        return imdb_match.group(1)
-    
-    return None
-
 
 def remove_urls(text):
     if not text:
@@ -153,6 +145,7 @@ async def restart_notification():
 commands = [
     BotCommand("start", "🚀 Start the bot"),
     BotCommand("set", "🎬 Manually add IMDb metadata"),
+    BotCommand("fixmetadata", "⚙️ Fix empty fields of Metadata"),
     BotCommand("log", "📄 Send the log file"),
     BotCommand("restart", "♻️ Restart the bot"),
 ]
