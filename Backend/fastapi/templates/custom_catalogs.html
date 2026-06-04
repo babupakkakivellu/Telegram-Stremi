@@ -236,6 +236,71 @@
     to { background-position: -220% 0; }
   }
 
+  /* ── Collapsible catalog list ── */
+  .catalog-list-wrapper {
+    position: relative;
+    transition: max-height 0.35s ease;
+  }
+  .catalog-list-wrapper.collapsed {
+    max-height: 286px;
+    overflow: hidden;
+  }
+  .catalog-list-wrapper.collapsed::after {
+    content: "";
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 76px;
+    background: linear-gradient(to bottom,
+      transparent,
+      color-mix(in srgb, var(--bg) 94%, var(--card) 6%));
+    pointer-events: none;
+    border-radius: 0 0 1.45rem 1.45rem;
+  }
+
+  #catalog-expand-btn {
+    font-size: .8rem;
+    letter-spacing: .03em;
+    margin-top: .55rem;
+  }
+
+  /* ── Auto-catalog group toggle ── */
+  .group-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+  }
+  .group-card-header:focus { outline: none; }
+
+  .group-chevron {
+    display: inline-flex;
+    color: var(--text-sec);
+    flex-shrink: 0;
+    transition: transform 0.22s ease;
+  }
+  .auto-group-card.expanded .group-chevron {
+    transform: rotate(90deg);
+  }
+
+  /* CSS grid trick for smooth height transition without knowing exact height */
+  .group-items {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.28s ease, opacity 0.22s ease;
+    opacity: 0;
+  }
+  .group-items > .group-items-inner { overflow: hidden; }
+  .auto-group-card.expanded .group-items {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+
   @media (max-width: 640px) {
     .hero-card { min-height: 13rem; }
     .btn-ui { width: 100%; }
@@ -350,10 +415,13 @@
           </div>
           <button onclick="loadCatalogs()" class="btn-ui btn-ghost px-3 py-2 text-sm">↻</button>
         </div>
-        <div id="catalog-list" class="space-y-3">
-          <div class="skeleton"></div>
-          <div class="skeleton"></div>
+        <div id="catalog-list-wrapper" class="catalog-list-wrapper collapsed">
+          <div id="catalog-list" class="space-y-3">
+            <div class="skeleton"></div>
+            <div class="skeleton"></div>
+          </div>
         </div>
+        <button id="catalog-expand-btn" onclick="toggleCatalogExpand()" class="btn-ui btn-ghost w-full hidden">▾ Show all catalogs</button>
       </div>
     </div>
 
@@ -420,6 +488,7 @@
 <script>
 let catalogs = [];
 let selectedCatalogId = null;
+let catalogListExpanded = false;
 
 function posterOrFallback(item) {
   return item.poster || 'https://via.placeholder.com/120x180/111827/94a3b8?text=No+Poster';
@@ -491,10 +560,16 @@ async function loadCatalogs() {
 
 function renderCatalogs() {
   const box = document.getElementById('catalog-list');
+  const expandBtn = document.getElementById('catalog-expand-btn');
+  const wrapper = document.getElementById('catalog-list-wrapper');
+
   if (!catalogs.length) {
     box.innerHTML = emptyState('✨', 'No custom catalog yet', 'Create your first curated Stremio section above.');
+    if (expandBtn) expandBtn.classList.add('hidden');
+    if (wrapper) wrapper.classList.remove('collapsed');
     return;
   }
+
   box.innerHTML = catalogs.map(c => {
     const isActive = c._id === selectedCatalogId;
     const count = (c.items || []).length;
@@ -515,6 +590,18 @@ function renderCatalogs() {
       </div>
     </div>`;
   }).join('');
+
+  // Manage expand button: only needed when list might overflow (~3+ cards)
+  if (catalogs.length > 3) {
+    if (expandBtn) {
+      expandBtn.classList.remove('hidden');
+      expandBtn.textContent = catalogListExpanded ? '▴ Collapse list' : '▾ Show all catalogs';
+    }
+    if (wrapper) wrapper.classList.toggle('collapsed', !catalogListExpanded);
+  } else {
+    if (expandBtn) expandBtn.classList.add('hidden');
+    if (wrapper) wrapper.classList.remove('collapsed');
+  }
 }
 
 function updateSelectedHeader() {
@@ -681,19 +768,26 @@ async function loadAutoCatalogSettings() {
     });
 
     box.innerHTML = Object.entries(groups).map(([group, items]) => `
-      <div class="catalog-card p-4 space-y-3">
-        <div class="flex items-center justify-between gap-2">
-          <h4 class="section-title text-base">${escapeHtml(group)}</h4>
-          <span class="pill text-[0.65rem] px-2 py-0.5">${items.length}</span>
-        </div>
-        <div class="space-y-2">
-          ${items.map(item => `
-            <label class="flex items-center justify-between gap-3 rounded-2xl p-3 cursor-pointer" style="background: color-mix(in srgb, var(--bg) 64%, transparent); border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);">
-              <span class="font-bold text-sm">${escapeHtml(item.name)}</span>
-              <input type="checkbox" class="auto-setting-checkbox switch-input hidden" value="${escapeHtml(item.key)}" ${item.enabled ? 'checked' : ''}>
-              <span class="switch"></span>
-            </label>
-          `).join('')}
+      <div class="catalog-card p-4 auto-group-card">
+        <button type="button" class="group-card-header" onclick="toggleAutoGroup(this.closest('.auto-group-card'))">
+          <div class="flex items-center gap-2">
+            <h4 class="section-title text-base">${escapeHtml(group)}</h4>
+            <span class="pill text-[0.65rem] px-2 py-0.5">${items.length}</span>
+          </div>
+          <svg class="group-chevron" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M6 4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div class="group-items">
+          <div class="group-items-inner space-y-2 pt-3">
+            ${items.map(item => `
+              <label class="flex items-center justify-between gap-3 rounded-2xl p-3 cursor-pointer" style="background: color-mix(in srgb, var(--bg) 64%, transparent); border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);">
+                <span class="font-bold text-sm">${escapeHtml(item.name)}</span>
+                <input type="checkbox" class="auto-setting-checkbox switch-input hidden" value="${escapeHtml(item.key)}" ${item.enabled ? 'checked' : ''}>
+                <span class="switch"></span>
+              </label>
+            `).join('')}
+          </div>
         </div>
       </div>
     `).join('');
@@ -787,6 +881,18 @@ async function runAutoSync(fullRebuild = false) {
     btn.textContent = old;
     await loadAutoSyncStatus();
   }
+}
+
+function toggleAutoGroup(card) {
+  card.classList.toggle('expanded');
+}
+
+function toggleCatalogExpand() {
+  catalogListExpanded = !catalogListExpanded;
+  const wrapper = document.getElementById('catalog-list-wrapper');
+  const btn = document.getElementById('catalog-expand-btn');
+  wrapper.classList.toggle('collapsed', !catalogListExpanded);
+  if (btn) btn.textContent = catalogListExpanded ? '▴ Collapse list' : '▾ Show all catalogs';
 }
 
 document.addEventListener('DOMContentLoaded', () => { loadCatalogs(); loadAutoSyncStatus(); loadAutoCatalogSettings(); });
