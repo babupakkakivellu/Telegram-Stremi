@@ -89,18 +89,20 @@ def parse_range_header(range_header: str, file_size: int):
 
 
 def select_best_client(target_dc: int) -> int:
-    """Pick the best available client.
+    """Pick the best available client with DC-aware priority.
 
     Score = work_loads + 3 × client_failures
     Failures are weighted 3× so a bot that has been timing out / erroring
     is deprioritised even if its current workload is low.
-    DC-aware selection is kept but currently commented out (uncomment to
-    prefer same-DC bots).
+    
+    Priority:
+    1. Same-DC clients (lowest latency)
+    2. Any other available client
     """
     def _score(idx: int) -> int:
         return work_loads.get(idx, 0) + 3 * client_failures.get(idx, 0)
 
-    # --- DC-aware selection (Enabled) ---------------------------------------
+    # --- DC-aware selection: Prefer same-DC clients ---
     matching = [
         idx for idx, dc in client_dc_map.items()
         if dc == target_dc and idx in multi_clients
@@ -109,8 +111,8 @@ def select_best_client(target_dc: int) -> int:
         selected = min(matching, key=_score)
         LOGGER.debug("DC-match client %s (DC %s) score=%s", selected, target_dc, _score(selected))
         return selected
-    # ------------------------------------------------------------------------
 
+    # Fallback: pick best overall client
     if multi_clients:
         selected = min(multi_clients.keys(), key=_score)
         LOGGER.debug(
@@ -259,6 +261,7 @@ async def media_streamer(
     target_dc = file_id.dc_id
     LOGGER.debug(f"File msg_id={msg_id} is in DC {target_dc}")
 
+    # Use improved DC-aware selection
     index = select_best_client(target_dc)
     tg_client = multi_clients[index]
 
