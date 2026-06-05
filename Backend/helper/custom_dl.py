@@ -23,20 +23,19 @@ def get_adaptive_chunk_size(client_index: int) -> int:
     """Return the best chunk size (bytes) for this client based on recent speed.
 
     Speed tiers:
-      < 5  MB/s  → 512 KB  (small chunks, faster first-byte on slow sessions)
-      5-20 MB/s  →   1 MB  (default)
-      20-60 MB/s →   2 MB  (fewer round-trips on fast sessions)
-      > 60 MB/s  →   4 MB  (maximise throughput on very fast sessions)
+      < 5  MB/s  → 1 MB    (conservative, faster first-byte)
+      5-20 MB/s  → 1 MB    (default)
+      20-60 MB/s → 2 MB    (fewer round-trips on fast sessions)
+      > 60 MB/s  → 4 MB    (maximise throughput on very fast sessions)
     """
     speed = client_avg_mbps.get(client_index, 0.0)
     if speed >= 60:
         return 4 * 1024 * 1024
     if speed >= 20:
         return 2 * 1024 * 1024
-    if speed >= 5:
-        return 1 * 1024 * 1024
-    # Unknown speed or < 5 MB/s → start conservative
-    return 512 * 1024
+    # Default to 1MB (increased from 512KB to reduce round-trips)
+    return 1 * 1024 * 1024
+
 
 class ByteStreamer:
     CHUNK_SIZE = 1024 * 1024  # 1 MB
@@ -115,6 +114,32 @@ class ByteStreamer:
             self._file_id_cache[message_id] = file_id
         return self._file_id_cache[message_id]
 
+    def _get_best_fallback_client(self, client_index: int, target_dc: int) -> Optional[int]:
+        """Select best fallback client: prefer DC-local, avoid high-failure clients."""
+        def _score(idx: int) -> int:
+            # Heavy penalty (1000×) for clients with 3+ failures
+            if client_failures.get(idx, 0) >= 3:
+                return 10000
+            # Penalize by failure count + workload
+            return (client_failures.get(idx, 0) * 50) + work_loads.get(idx, 0)
+
+        # Tier 1: DC-local clients (prefer same DC)
+        dc_local = [
+            idx for idx in multi_clients.keys()
+            if idx != client_index and client_dc_map.get(idx) == target_dc
+        ]
+        if dc_local:
+            best = min(dc_local, key=_score)
+            return best if _score(best) < 5000 else None
+
+        # Tier 2: Any available client (excluding primary)
+        other_clients = [idx for idx in multi_clients.keys() if idx != client_index]
+        if other_clients:
+            best = min(other_clients, key=_score)
+            return best if _score(best) < 5000 else None
+
+        return None
+
     async def prefetch_stream(
         self,
         file_id: FileId,
@@ -162,31 +187,31 @@ class ByteStreamer:
 
         media_session = await self._get_media_session(file_id)
         location = await self._get_location(file_id)
+        target_dc = file_id.dc_id
 
         async def fetch_chunk_with_retries(seq_idx: int, off: int) -> Tuple[int, Optional[bytes]]:
-            """Fetch one chunk with timeout, exponential back-off, and bot fallback.
+            """Fetch one chunk with timeout, exponential back-off, and smart fallback.
 
-            Retry schedule (max 3 tries):
-              tries 0    → same bot / same session, 15 s timeout each
-              tries 1-2  → try a healthier fallback bot (if available),
-                           still with 15 s timeout
-            On every TimeoutError the primary client's failure counter is incremented
-            so select_best_client will avoid it for future requests.
+            Retry schedule (max 4 tries):
+              try 0      → primary client / session, 20 s timeout
+              try 1-2    → best fallback client (DC-local preferred), 20 s timeout
+              try 3      → any available fallback, 20 s timeout
+            
+            Increments failure counter on timeout so select_best_client() deprioritizes
+            hammered clients.
             """
             tries = 0
-            while tries < 3 and not stop_event.is_set():
+            MAX_RETRIES = 4  # Increased from 3 to 4 for better resilience
+            TIMEOUT_SEC = 20.0  # Increased from 15s to 20s for cross-DC jitter
+            
+            while tries < MAX_RETRIES and not stop_event.is_set():
                 # --- choose which media session to use this attempt ---
                 use_session = media_session
                 use_client_idx = client_index
+                
                 if tries >= 1 and len(multi_clients) > 1:
-                    # Pick the best *other* client by score = workload + 3×failures
-                    def _score(idx):
-                        return work_loads.get(idx, 0) + 3 * client_failures.get(idx, 0)
-                    fallback_idx = min(
-                        (i for i in multi_clients if i != client_index),
-                        key=_score,
-                        default=None,
-                    )
+                    # Smart fallback: pick best other client (DC-aware)
+                    fallback_idx = self._get_best_fallback_client(client_index, target_dc)
                     if fallback_idx is not None:
                         fb_streamer = ByteStreamer._instances.get(fallback_idx)
                         if fb_streamer is None:
@@ -195,10 +220,12 @@ class ByteStreamer:
                             use_session = await fb_streamer._get_media_session(file_id)
                             use_client_idx = fallback_idx
                             LOGGER.debug(
-                                "Chunk fallback: seq=%s try=%s primary=%s → fallback=%s",
-                                seq_idx, tries, client_index, fallback_idx,
+                                "Chunk fallback: seq=%s try=%s primary=%s (DC%s) → fallback=%s (DC%s)",
+                                seq_idx, tries, client_index, client_dc_map.get(client_index, "?"),
+                                fallback_idx, client_dc_map.get(fallback_idx, "?"),
                             )
-                        except Exception:
+                        except Exception as e:
+                            LOGGER.debug(f"Fallback session creation failed: {e}, retrying with primary")
                             use_session = media_session  # revert if fallback session fails
                             use_client_idx = client_index
 
@@ -210,38 +237,55 @@ class ByteStreamer:
                                 location=location, offset=off, limit=chunk_size
                             )
                         ),
-                        timeout=15.0,
+                        timeout=TIMEOUT_SEC,
                     )
                     chunk_bytes = getattr(r, "bytes", None) if r else None
                     
                     if chunk_bytes == b"":
+                        # Empty chunk = EOF (legitimate)
                         return seq_idx, None
+
+                    if chunk_bytes is None:
+                        # None from server = real error, retry
+                        tries += 1
+                        LOGGER.debug(
+                            "Chunk returned None seq=%s off=%s try=%s client=%s, retrying",
+                            seq_idx, off, tries, use_client_idx,
+                        )
+                        continue
 
                     # If we succeeded via a fallback, mark primary as degraded
                     if use_client_idx != client_index:
                         client_failures[client_index] = client_failures.get(client_index, 0) + 1
+                        LOGGER.debug("Primary client degraded (used fallback); failures=%s", 
+                                    client_failures[client_index])
+                    
                     return seq_idx, chunk_bytes
 
                 except asyncio.TimeoutError:
                     tries += 1
                     client_failures[use_client_idx] = client_failures.get(use_client_idx, 0) + 1
                     LOGGER.warning(
-                        "Chunk timeout seq=%s off=%s try=%s client=%s",
-                        seq_idx, off, tries, use_client_idx,
+                        "Chunk timeout seq=%s off=%s try=%s client=%s (failures=%s), retrying...",
+                        seq_idx, off, tries, use_client_idx, client_failures[use_client_idx],
                     )
+                    if tries < MAX_RETRIES:
+                        # Exponential back-off: 0.5, 1, 2, 4 seconds (cap at 10)
+                        await asyncio.sleep(min(0.5 * (2 ** (tries - 1)), 10.0))
+                
                 except Exception as e:
                     tries += 1
                     LOGGER.debug(
                         "Fetch chunk error seq=%s off=%s try=%s client=%s err=%s",
                         seq_idx, off, tries, use_client_idx, getattr(e, "args", e),
                     )
+                    if tries < MAX_RETRIES:
+                        await asyncio.sleep(min(0.5 * (2 ** (tries - 1)), 10.0))
 
-                # Exponential back-off: 0.5 s, 1 s, 2 s, 4 s, 8 s, 10 s (cap)
-                await asyncio.sleep(min(0.5 * (2 ** (tries - 1)), 10.0))
-
+            # All retries exhausted
             LOGGER.error(
-                "Failed to fetch chunk seq=%s off=%s after 3 retries, client=%s",
-                seq_idx, off, client_index,
+                "Failed to fetch chunk seq=%s off=%s after %d retries, client=%s (failures=%s)",
+                seq_idx, off, MAX_RETRIES, client_index, client_failures.get(client_index, 0),
             )
             return seq_idx, None
 
@@ -293,8 +337,14 @@ class ByteStreamer:
                             scheduled_tasks.pop(completed_seq, None)
 
                             if chunk_bytes is None:
-                                LOGGER.error("Chunk fetch returned empty for stream=%s seq=%s. Filling with zero bytes.", stream_id, seq_idx)
-                                chunk_bytes = b"\x00" * chunk_size
+                                # Failed to fetch after all retries: terminate stream cleanly
+                                LOGGER.error(
+                                    "Chunk permanently failed for stream=%s seq=%s. Terminating stream.",
+                                    stream_id, seq_idx
+                                )
+                                ACTIVE_STREAMS[stream_id]["status"] = "error"
+                                await q.put((None, None))
+                                return
 
                             results_buffer[seq_idx] = chunk_bytes
 
