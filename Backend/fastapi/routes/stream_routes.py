@@ -13,7 +13,7 @@ from Backend import db
 from Backend.helper.encrypt import decode_string
 from Backend.helper.exceptions import InvalidHash
 from Backend.helper.custom_dl import ByteStreamer, ACTIVE_STREAMS, RECENT_STREAMS, get_adaptive_chunk_size
-from Backend.pyrofork.bot import StreamBot, work_loads, multi_clients, client_dc_map, client_failures, client_avg_mbps
+from Backend.pyrofork.bot import work_loads, multi_clients, client_dc_map, client_failures, client_avg_mbps
 from Backend.config import Telegram
 from Backend.logger import LOGGER
 from Backend.fastapi.security.tokens import verify_token
@@ -22,6 +22,10 @@ import asyncio
 router = APIRouter(tags=["Streaming"])
 
 _streamer_by_client: Dict = {}
+_rr_counter: int = 0
+
+_title_cache: Dict[str, tuple] = {}
+_TITLE_CACHE_TTL = 300
 
 
 def make_json_safe(obj):
@@ -89,39 +93,47 @@ def parse_range_header(range_header: str, file_size: int):
 
 
 def select_best_client(target_dc: int) -> int:
-    """Pick the best available client with DC-aware priority.
+    """Pick the best available client with round-robin tie-breaking.
 
-    Score = work_loads + 3 × client_failures
-    Failures are weighted 3× so a bot that has been timing out / erroring
-    is deprioritised even if its current workload is low.
-    
-    Priority:
-    1. Same-DC clients (lowest latency)
-    2. Any other available client
+    Score = work_loads + 3 × client_failures.
+    When multiple clients share the minimum score (typical at startup and
+    between short seeks) Python's min() always returns the first key — i.e.
+    client 0 for every request.  The round-robin counter breaks that tie so
+    all 16 bots share the load and no single bot hits Telegram FLOOD_WAIT.
+
+    target_dc > 0  →  prefer same-DC clients; fall back to all if none match.
+    target_dc == 0 →  no DC preference; pool is all available clients.
     """
+    global _rr_counter
+
     def _score(idx: int) -> int:
         return work_loads.get(idx, 0) + 3 * client_failures.get(idx, 0)
 
-    # --- DC-aware selection: Prefer same-DC clients ---
-    matching = [
-        idx for idx, dc in client_dc_map.items()
-        if dc == target_dc and idx in multi_clients
-    ]
-    if matching:
-        selected = min(matching, key=_score)
-        LOGGER.debug("DC-match client %s (DC %s) score=%s", selected, target_dc, _score(selected))
-        return selected
+    if target_dc > 0:
+        matching = [
+            idx for idx, dc in client_dc_map.items()
+            if dc == target_dc and idx in multi_clients
+        ]
+    else:
+        matching = []
 
-    # Fallback: pick best overall client
-    if multi_clients:
-        selected = min(multi_clients.keys(), key=_score)
-        LOGGER.debug(
-            "Selected client %s (DC %s) score=%s",
-            selected, client_dc_map.get(selected, "?"), _score(selected),
-        )
-        return selected
+    if not matching:
+        matching = list(multi_clients.keys())
+    if not matching:
+        return 0
 
-    return 0
+    min_score = min(_score(i) for i in matching)
+    tied = sorted(i for i in matching if _score(i) == min_score)
+
+    # Round-robin among equally-scored candidates so every bot gets used.
+    selected = tied[_rr_counter % len(tied)]
+    _rr_counter = (_rr_counter + 1) % max(len(multi_clients), 1)
+
+    LOGGER.debug(
+        "select_best_client DC=%s → client=%s (score=%s, pool=%s)",
+        target_dc, selected, min_score, len(tied),
+    )
+    return selected
 
 
 async def decay_client_failures() -> None:
@@ -223,15 +235,14 @@ async def stream_handler(
         raise HTTPException(status_code=400, detail="Missing id")
 
     chat_id = int(f"-100{decoded['chat_id']}")
-    message = await StreamBot.get_messages(chat_id, int(msg_id))
-    file = message.video or message.document
-    secure_hash = file.file_unique_id[:6]
-
+    # Token already authenticates the request; the hash check inside
+    # media_streamer is skipped to avoid an extra get_messages() round-trip
+    # on every seek.  File identity is verified by the streaming client.
     return await media_streamer(
         request=request,
         chat_id=chat_id,
         msg_id=int(msg_id),
-        secure_hash=secure_hash,
+        secure_hash="SKIP_HASH_CHECK",
         token=token,
         token_data=token_data,
         stream_id_hash=id,
@@ -246,28 +257,21 @@ async def media_streamer(
     token_data: dict = None,
     stream_id_hash: str = None,
 ):
-    temp_client = multi_clients[min(multi_clients.keys(), key=lambda i: work_loads.get(i, 0) + 3 * client_failures.get(i, 0))]
-    if temp_client not in _streamer_by_client:
-        idx = next((i for i, c in multi_clients.items() if c is temp_client), -1)
-        _streamer_by_client[temp_client] = ByteStreamer(temp_client, idx)
-    temp_streamer = _streamer_by_client[temp_client]
-
-    file_id = await temp_streamer.get_file_properties(chat_id=chat_id, message_id=msg_id)
-
-    if secure_hash != "SKIP_HASH_CHECK":  # Don't check this it is for my Webdav
-        if file_id.unique_id[:6] != secure_hash:
-            raise InvalidHash
-
-    target_dc = file_id.dc_id
-    LOGGER.debug(f"File msg_id={msg_id} is in DC {target_dc}")
-
-    # Use improved DC-aware selection
-    index = select_best_client(target_dc)
+    # Pick the primary client and fetch file metadata.
+    index = select_best_client(0)
     tg_client = multi_clients[index]
-
     if tg_client not in _streamer_by_client:
         _streamer_by_client[tg_client] = ByteStreamer(tg_client, index)
     streamer: ByteStreamer = _streamer_by_client[tg_client]
+
+    file_id = await streamer.get_file_properties(chat_id=chat_id, message_id=msg_id)
+    target_dc = file_id.dc_id
+
+    if secure_hash != "SKIP_HASH_CHECK":
+        if file_id.unique_id[:6] != secure_hash:
+            raise InvalidHash
+
+    LOGGER.debug("Stream msg_id=%s DC=%s via client=%s", msg_id, target_dc, index)
 
     file_size = file_id.file_size
     range_header = request.headers.get("Range", "")
@@ -288,11 +292,17 @@ async def media_streamer(
     # Extract original title from the URL path name, fallback to raw name
     decoded_name = unquote(request.path_params.get("name", ""))
     
-    # Look up the real title from the database using the Stremio stream_id_hash
+    # Look up the real title — cached to avoid a DB hit on every seek.
     db_title = None
     if stream_id_hash:
-        db_title = await db.get_title_by_stream_id(stream_id_hash)
-        LOGGER.info(f"Stream lookup for hash '{stream_id_hash}' returned title: {db_title}")
+        _now = time.time()
+        _cached = _title_cache.get(stream_id_hash)
+        if _cached and _now < _cached[1]:
+            db_title = _cached[0]
+        else:
+            db_title = await db.get_title_by_stream_id(stream_id_hash)
+            _title_cache[stream_id_hash] = (db_title, _now + _TITLE_CACHE_TTL)
+            LOGGER.info(f"Stream lookup for hash '{stream_id_hash}' returned title: {db_title}")
         
     final_title = db_title if db_title else decoded_name
     
@@ -303,8 +313,34 @@ async def media_streamer(
         "user_name": token_data.get("name", "Unknown") if token_data else "Unknown"
     }
 
-    prefetch_count = Telegram.PARALLEL
-    parallelism = Telegram.PRE_FETCH
+    parallelism    = Telegram.PARALLEL    # concurrent Telegram GetFile requests
+    prefetch_count = Telegram.PRE_FETCH   # pre-fetch buffer queue size (chunks)
+
+    # Gather extra bot clients so each parallel GetFile slot uses a different
+    # Telegram account — different rate-limit buckets, no per-session FloodWait.
+    extra_clients_for_stream = []
+    if parallelism > 1 and len(multi_clients) > 1:
+        other_indices = sorted(
+            (i for i in multi_clients if i != index),
+            key=lambda i: work_loads.get(i, 0),
+        )
+
+        async def _get_extra_file_id(ec_idx: int):
+            ec_client = multi_clients[ec_idx]
+            if ec_client not in _streamer_by_client:
+                _streamer_by_client[ec_client] = ByteStreamer(ec_client, ec_idx)
+            ec_streamer = _streamer_by_client[ec_client]
+            try:
+                ec_fid = await ec_streamer.get_file_properties(chat_id=chat_id, message_id=msg_id)
+                return (ec_idx, ec_streamer, ec_fid)
+            except Exception as e:
+                LOGGER.warning("Extra client %s file_id fetch failed: %s", ec_idx, e)
+                return None
+
+        results = await asyncio.gather(*[
+            _get_extra_file_id(i) for i in other_indices[:parallelism - 1]
+        ])
+        extra_clients_for_stream = [r for r in results if r is not None]
 
     body_gen = await streamer.prefetch_stream(
         file_id=file_id,
@@ -319,6 +355,9 @@ async def media_streamer(
         meta=meta,
         parallelism=parallelism,
         request=request,
+        chat_id=chat_id,
+        message_id=msg_id,
+        extra_clients=extra_clients_for_stream,
     )
 
     asyncio.create_task(track_usage_from_stats(stream_id, token, token_data))
@@ -328,16 +367,6 @@ async def media_streamer(
 
     if "." not in file_name and "/" in mime_type:
         file_name = f"{file_name}.{mime_type.split('/')[1]}"
-
-    # HEAD: return headers only (no body), include Content-Length so the
-    # client knows the file size without opening a stream.
-    # GET: do NOT set Content-Length on the StreamingResponse.
-    # If a Telegram chunk fetch times out mid-stream the generator exits early,
-    # delivering fewer bytes than the declared length.  h11 enforces
-    # Content-Length strictly and raises LocalProtocolError in that case.
-    # Without Content-Length, uvicorn uses chunked transfer encoding which
-    # handles early termination gracefully.  Stremio / media players
-    # are fine with chunked 206 responses.
 
     # HEAD request support
     from fastapi.responses import Response as PlainResponse
