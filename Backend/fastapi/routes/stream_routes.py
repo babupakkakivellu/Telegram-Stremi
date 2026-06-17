@@ -12,7 +12,7 @@ from collections import deque
 from Backend import db
 from Backend.helper.encrypt import decode_string
 from Backend.helper.exceptions import InvalidHash
-from Backend.helper.custom_dl import ByteStreamer, ACTIVE_STREAMS, RECENT_STREAMS, get_adaptive_chunk_size
+from Backend.helper.custom_dl import ByteStreamer, ACTIVE_STREAMS, RECENT_STREAMS
 from Backend.pyrofork.bot import work_loads, multi_clients, client_dc_map, client_failures, client_avg_mbps
 from Backend.config import Telegram
 from Backend.logger import LOGGER
@@ -278,8 +278,7 @@ async def media_streamer(
     start, end = parse_range_header(range_header, file_size)
     req_length = end - start + 1
 
-    # Adaptive chunk size based on this client's recent measured throughput
-    chunk_size = get_adaptive_chunk_size(index)
+    chunk_size = 1024 * 1024
     offset = start - (start % chunk_size)
     first_part_cut = start - offset
     last_part_cut = (end % chunk_size) + 1
