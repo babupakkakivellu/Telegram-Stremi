@@ -18,11 +18,7 @@ from Backend import db
 from Backend.pyrofork.bot import work_loads, multi_clients, client_dc_map, client_failures, client_avg_mbps
 
 ACTIVE_STREAMS: Dict[str, Dict] = {}
-RECENT_STREAMS = deque(maxlen=50)
-
-
-def get_adaptive_chunk_size(client_index: int) -> int:
-    return 1024 * 1024
+RECENT_STREAMS = deque(maxlen=20)
 
 class ByteStreamer:
     CHUNK_SIZE = 1024 * 1024  # 1 MB
@@ -41,54 +37,36 @@ class ByteStreamer:
 
     async def _prewarm_sessions(self):
         common_dcs = [1, 2, 4, 5]
-        LOGGER.debug("Pre-warming media sessions for common DCs...")
-        
+        test_mode = await self.client.storage.test_mode()
+        current_dc = await self.client.storage.dc_id()
         for dc in common_dcs:
+            if dc in self.client.media_sessions or dc == current_dc:
+                continue
             try:
-                if dc in self.client.media_sessions:
-                    LOGGER.debug(f"Media session for DC {dc} already exists, skipping")
-                    continue
-
-                test_mode = await self.client.storage.test_mode()
-                current_dc = await self.client.storage.dc_id()
- 
-                if dc == current_dc:
-                    continue
-                
                 auth_key = await Auth(self.client, dc, test_mode).create()
                 session = Session(self.client, dc, auth_key, test_mode, is_media=True)
                 session.no_updates = True
                 session.timeout = 30
                 session.sleep_threshold = 60
-                
                 await session.start()
-                
-                for attempt in range(6):
+                imported = False
+                for _ in range(6):
                     try:
-                        exported = await self.client.invoke(
-                            raw.functions.auth.ExportAuthorization(dc_id=dc)
-                        )
-                        await session.send(
-                            raw.functions.auth.ImportAuthorization(
-                                id=exported.id, bytes=exported.bytes
-                            )
-                        )
+                        exported = await self.client.invoke(raw.functions.auth.ExportAuthorization(dc_id=dc))
+                        await session.send(raw.functions.auth.ImportAuthorization(id=exported.id,bytes=exported.bytes,))
+                        imported = True
                         break
                     except AuthBytesInvalid:
-                        LOGGER.debug(f"AuthBytesInvalid during pre-warm for DC {dc}; retrying...")
                         await asyncio.sleep(0.5)
                     except OSError:
-                        LOGGER.debug(f"OSError during pre-warm for DC {dc}; retrying...")
                         await asyncio.sleep(1)
-                    except Exception as e:
-                        LOGGER.debug(f"Error during pre-warm for DC {dc}: {e}")
+                    except Exception:
                         break
-                
-                self.client.media_sessions[dc] = session
-                LOGGER.debug(f"Pre-warmed media session for DC {dc}")
-                
-            except Exception as e:
-                LOGGER.debug(f"Could not pre-warm DC {dc}: {e}")
+                if imported:
+                    self.client.media_sessions[dc] = session
+                else:
+                    await session.stop()
+            except Exception:
                 continue
 
     async def get_file_properties(self, chat_id: int, message_id: int) -> FileId:
