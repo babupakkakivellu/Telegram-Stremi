@@ -35,6 +35,5 @@ class Telegram:
     SUBSCRIPTION_URL = getenv("SUBSCRIPTION_URL", "https://t.me/")
     APPROVER_IDS = [int(x.strip()) for x in (getenv("APPROVER_IDS") or "").split(",") if x.strip().isdigit()]
 
-    PROXY = getenv("Proxy", "false").lower() == "true"
     HTTP_PROXY_URL = getenv("HTTP_Proxy_URL", "")
     SHOW_PROXY_AND_NON_PROXY_BOTH = getenv("SHOW_ProxyAndNonProxyBoth", "false").lower() == "true"
