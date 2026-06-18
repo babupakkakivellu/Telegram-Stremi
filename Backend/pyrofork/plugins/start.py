@@ -5,10 +5,7 @@ from Backend.config import Telegram
 from Backend import db
 from datetime import datetime
 
-if Telegram.SUBSCRIPTION:
-    @Client.on_message(filters.command('start'), group=10)
-else:
-    @Client.on_message(filters.command('start') & filters.private & CustomFilters.owner, group=10)
+@Client.on_message(filters.command('start') & filters.private, group=10)
 async def send_start_message(client: Client, message: Message):
     try:
         user_id = (message.from_user.id if message.from_user else None) or (message.sender_chat.id if message.sender_chat else None) or message.chat.id
@@ -16,10 +13,10 @@ async def send_start_message(client: Client, message: Message):
         addon_url = f"{base_url}/stremio/manifest.json"
 
         if not Telegram.SUBSCRIPTION:
-            # Generate or fetch API token for free user
+            if user_id != Telegram.OWNER_ID:
+                return
             user_name = (message.from_user.first_name or message.from_user.username or f"User {user_id}") if message.from_user else f"Chat {user_id}"
             try:
-                # Ensure user gets a token
                 token_doc = await db.add_api_token(name=user_name, user_id=user_id)
                 token_str = token_doc.get("token")
                 addon_url = f"{base_url}/stremio/{token_str}/manifest.json"
