@@ -1,20 +1,20 @@
 from fastapi import APIRouter, HTTPException, Depends
 from typing import Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 from Backend.config import Telegram
 from Backend import db, __version__
 import PTN
+from fastapi.responses import HTMLResponse
 from datetime import datetime, timezone, timedelta
 from Backend.fastapi.security.tokens import verify_token
 
+router = APIRouter(prefix="/stremio", tags=["Stremio Addon"])
 
 # --- Configuration ---
 BASE_URL = Telegram.BASE_URL
 ADDON_NAME = "Telegram"
 ADDON_VERSION = __version__
 PAGE_SIZE = 15
-
-router = APIRouter(prefix="/stremio", tags=["Stremio Addon"])
 
 # Define available genres
 GENRES = [
@@ -24,18 +24,8 @@ GENRES = [
     "Sci-Fi", "Sport", "Thriller", "War", "Western"
 ]
 
+# --------------- Helper Functions -----------------
 
-def format_released_date(media):
-    year = media.get("release_year")
-    if year:
-        try:
-            return datetime(int(year), 1, 1).isoformat() + "Z"
-        except:
-            return None
-
-    return None
-
-# --- Helper Functions ---
 def convert_to_stremio_meta(item: dict) -> dict:
     media_type = "series" if item.get("media_type") == "tv" else "movie"
     
@@ -56,9 +46,17 @@ def convert_to_stremio_meta(item: dict) -> dict:
         "cast": item.get("cast") or [],
         "runtime": item.get("runtime") or "",
     }
-
     return meta
 
+
+def format_released_date(media):
+    year = media.get("release_year")
+    if year:
+        try:
+            return datetime(int(year), 1, 1).isoformat() + "Z"
+        except:
+            return None
+    return None
 
 def format_stream_details(filename: str, quality: str, size: str) -> tuple[str, str]:
     try:
@@ -106,7 +104,8 @@ def get_resolution_priority(stream_name: str) -> int:
             return res_value
     return 1
 
-# --- Routes ---
+# ------------------ Routes -----------------------
+
 @router.get("/{token}/manifest.json")
 async def get_manifest(token: str, token_data: dict = Depends(verify_token)):
     if Telegram.HIDE_CATALOG:
@@ -159,10 +158,6 @@ async def get_manifest(token: str, token_data: dict = Depends(verify_token)):
             }
         ]
 
-        # Add visible custom catalogs to the Stremio home screen.
-        # Each custom catalog is exposed once for movies and once for series because
-        # Stremio catalogs are type-specific. Hidden catalogs remain manageable in the
-        # web panel, but are not included in the manifest.
         try:
             custom_catalogs = await db.get_custom_catalogs(visible_only=True)
             for catalog in custom_catalogs:
@@ -186,7 +181,6 @@ async def get_manifest(token: str, token_data: dict = Depends(verify_token)):
             pass
 
 
-    # Build dynamic name/description/version with subscription info
     addon_name = ADDON_NAME
     addon_desc = "Streams movies and series from your Telegram."
     addon_version = ADDON_VERSION
@@ -195,9 +189,8 @@ async def get_manifest(token: str, token_data: dict = Depends(verify_token)):
     if Telegram.SUBSCRIPTION:
         user_id = token_data.get("user_id")
         if user_id:
-            from Backend import db as _db
             try:
-                user = await _db.get_user(int(user_id))
+                user = await db.get_user(int(user_id))
                 if user and user.get("subscription_status") == "active":
                     expiry_obj = user.get("subscription_expiry")
                     if expiry_obj:
@@ -207,21 +200,18 @@ async def get_manifest(token: str, token_data: dict = Depends(verify_token)):
                             f"📅 Subscription active until {expiry_str}.\n"
                             f"Streams movies and series from your Telegram."
                         )
-                        # Encode expiry epoch (low 16 bits, hex) into version so
-                        # Stremio detects a change when subscription is updated.
                         epoch_tag = format(int(expiry_obj.timestamp()) & 0xFFFF, "x")
                         addon_version = f"{ADDON_VERSION}-{epoch_tag}"
                     else:
                         addon_name = f"{ADDON_NAME} — Active"
                         addon_desc = "✅ Subscription active.\nStreams movies and series from your Telegram."
             except Exception:
-                pass  # Fallback to defaults on error
+                pass
 
-    # Configure URL — opening this reinstalls the addon with latest manifest
     configure_url = f"{Telegram.BASE_URL}/stremio/{token}/configure"
 
     return {
-        "id": f"telegram.media.{token[:8]}",   # per-user ID so each token is independent
+        "id": f"telegram.media.{token[:8]}",
         "version": addon_version,
         "name": addon_name,
         "logo": "https://i.postimg.cc/XqWnmDXr/Picsart-25-10-09-08-09-45-867.png",
@@ -352,16 +342,11 @@ async def get_meta(token: str, media_type: str, id: str, token_data: dict = Depe
 
     # --- Add Episodes ---
     if media_type == "series" and "seasons" in media:
-
         yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-
         videos = []
-
         for season in sorted(media.get("seasons", []), key=lambda s: s.get("season_number")):
             for episode in sorted(season.get("episodes", []), key=lambda e: e.get("episode_number")):
-
                 episode_id = f"{id}:{season['season_number']}:{episode['episode_number']}"
-
                 videos.append({
                     "id": episode_id,
                     "title": episode.get("title", f"Episode {episode['episode_number']}"),
@@ -372,7 +357,6 @@ async def get_meta(token: str, media_type: str, id: str, token_data: dict = Depe
                     "thumbnail": episode.get("episode_backdrop") or "https://raw.githubusercontent.com/weebzone/Colab-Tools/refs/heads/main/no_episode_backdrop.png",
                     "imdb_id": episode.get("imdb_id") or media.get("imdb_id"),
                 })
-
         meta_obj["videos"] = videos
     return {"meta": meta_obj}
 
@@ -385,13 +369,12 @@ async def get_streams(
 ):
 
     if token_data.get("subscription_expired"):
-        from Backend.config import Telegram as _TG
         return {
             "streams": [
                 {
                     "name": "🚫 Subscription Expired",
                     "title": "Your subscription has expired.\nRenew via the bot to continue watching.",
-                    "url": _TG.SUBSCRIPTION_URL
+                    "url": Telegram.SUBSCRIPTION_URL
                 }
             ]
         }
@@ -410,7 +393,7 @@ async def get_streams(
                 {
                     "name": "Limit Reached",
                     "title": title,
-                    "url": token_data["limit_video"]
+                    "url": f"tg://user?id={Telegram.OWNER_ID}"
                 }
             ]
         }
@@ -475,9 +458,6 @@ async def get_streams(
         key=lambda s: get_resolution_priority(s.get("name", "")),
         reverse=True
     )
-
-    # Deduplicate stream names — Stremio collapses streams with identical names,
-    # so when two files share the same caption we append (1), (2) ... to each duplicate.
     name_count: dict = {}
     for s in streams:
         name_count[s["name"]] = name_count.get(s["name"], 0) + 1
@@ -487,31 +467,15 @@ async def get_streams(
         if name_count[s["name"]] > 1:
             seen[s["name"]] = seen.get(s["name"], 0) + 1
             s["name"] = f"{s['name']} ({seen[s['name']]})"
-
     return {"streams": streams}
-
-
-
-
-
 
 @router.get("/{token}/configure")
 async def configure_addon(token: str):
-    """
-    Configure/update page for the Stremio addon.
-    Uses the correct stremio://addon_install?manifest= deep-link so Stremio
-    actually shows the Install/Update dialog when the button is clicked.
-    """
-    from urllib.parse import quote
-    from fastapi.responses import HTMLResponse
-    from Backend import db as _db
-
     manifest_url = f"{Telegram.BASE_URL}/stremio/{token}/manifest.json"
-    # Universal Stremio web install — works on desktop and mobile
     web_install_url = f"https://web.stremio.com/#/?addon_manifest={quote(manifest_url, safe='')}"
 
     # Fetch user info for display
-    token_doc = await _db.get_api_token(token)
+    token_doc = await db.get_api_token(token)
     user_name = "Unknown"
     expiry_str = "N/A"
     status_color = "#ef4444"
@@ -521,7 +485,7 @@ async def configure_addon(token: str):
         uid = token_doc.get("user_id")
         if uid:
             try:
-                user = await _db.get_user(int(uid))
+                user = await db.get_user(int(uid))
                 if user:
                     user_name = user.get("first_name") or user.get("username") or f"User {uid}"
                     sub_status = user.get("subscription_status", "")
