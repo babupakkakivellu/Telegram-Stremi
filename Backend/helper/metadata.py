@@ -16,7 +16,21 @@ from Backend.helper.encrypt import encode_string
 # ----------------- Configuration -----------------
 
 DELAY = 0
-tmdb = aioTMDb(key=SettingsManager.current().tmdb_api, language="en-US", region="US")
+
+_tmdb_client: aioTMDb | None = None
+_tmdb_client_key: str | None = None
+
+
+def get_tmdb_client() -> aioTMDb:
+    global _tmdb_client, _tmdb_client_key
+
+    current_key = SettingsManager.current().tmdb_api
+    if _tmdb_client is None or _tmdb_client_key != current_key:
+        _tmdb_client = aioTMDb(key=current_key, language="en-US", region="US")
+        _tmdb_client_key = current_key
+
+    return _tmdb_client
+
 
 # Cache dictionaries (per run)
 IMDB_CACHE: dict = {}
@@ -285,16 +299,16 @@ async def safe_tmdb_search(title: str, type_: str, year: Optional[int] = None):
         async with API_SEMAPHORE:
             if type_ == "movie":
                 results = (
-                    await tmdb.search().movies(query=title, year=year)
+                    await get_tmdb_client().search().movies(query=title, year=year)
                     if year
-                    else await tmdb.search().movies(query=title)
+                    else await get_tmdb_client().search().movies(query=title)
                 )
                 # Year-constrained search sometimes returns nothing for new/limited releases
                 if not results and year:
                     async with API_SEMAPHORE:
-                        results = await tmdb.search().movies(query=title)
+                        results = await get_tmdb_client().search().movies(query=title)
             else:
-                results = await tmdb.search().tv(query=title)
+                results = await get_tmdb_client().search().tv(query=title)
 
         best = _pick_best_tmdb_result(results, title, year, type_)
 
@@ -357,10 +371,10 @@ async def _tmdb_movie_details(movie_id):
         return TMDB_DETAILS_CACHE[movie_id]
     try:
         async with API_SEMAPHORE:
-            details = await tmdb.movie(movie_id).details(
+            details = await get_tmdb_client().movie(movie_id).details(
                 append_to_response="external_ids,credits"
             )
-            images = await tmdb.movie(movie_id).images()
+            images = await get_tmdb_client().movie(movie_id).images()
             details.images = images
 
         TMDB_DETAILS_CACHE[movie_id] = details
@@ -376,10 +390,10 @@ async def _tmdb_tv_details(tv_id):
         return TMDB_DETAILS_CACHE[tv_id]
     try:
         async with API_SEMAPHORE:
-            details = await tmdb.tv(tv_id).details(
+            details = await get_tmdb_client().tv(tv_id).details(
                 append_to_response="external_ids,credits"
             )
-            images = await tmdb.tv(tv_id).images()
+            images = await get_tmdb_client().tv(tv_id).images()
             details.images = images
         TMDB_DETAILS_CACHE[tv_id] = details
         return details
@@ -395,7 +409,7 @@ async def _tmdb_episode_details(tv_id, season, episode):
         return EPISODE_CACHE[key]
     try:
         async with API_SEMAPHORE:
-            details = await tmdb.episode(tv_id, season, episode).details()
+            details = await get_tmdb_client().episode(tv_id, season, episode).details()
         EPISODE_CACHE[key] = details
         return details
     except Exception:
@@ -826,9 +840,9 @@ async def search_movie_candidates(query: str, year: int | None = None, limit: in
     try:
         async with API_SEMAPHORE:
             tmdb_results = (
-                await tmdb.search().movies(query=query, year=year)
+                await get_tmdb_client().search().movies(query=query, year=year)
                 if year
-                else await tmdb.search().movies(query=query)
+                else await get_tmdb_client().search().movies(query=query)
             )
 
         for item in (tmdb_results or [])[:limit]:
@@ -897,7 +911,7 @@ async def search_tv_candidates(query: str, limit: int = 8) -> list[dict]:
 
     try:
         async with API_SEMAPHORE:
-            tmdb_results = await tmdb.search().tv(query=query)
+            tmdb_results = await get_tmdb_client().search().tv(query=query)
 
         for item in (tmdb_results or [])[:limit]:
             tmdb_id = getattr(item, "id", None)
