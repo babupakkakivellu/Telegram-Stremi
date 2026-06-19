@@ -3,7 +3,7 @@ import Backend
 from Backend.helper.task_manager import edit_message
 from Backend.logger import LOGGER
 from Backend import db
-from Backend.config import Telegram
+from Backend.helper.settings_manager import SettingsManager
 from Backend.helper.pyro import clean_filename, get_readable_file_size, remove_urls
 from Backend.helper.metadata import metadata
 from pyrogram import filters, Client
@@ -13,6 +13,7 @@ from pyrogram.enums.parse_mode import ParseMode
 from Backend.helper.encrypt import encode_string
 from Backend.helper.encrypt import encode_string
 from Backend.helper.metadata import extract_default_id
+
 
 
 file_queue = Queue()
@@ -35,7 +36,7 @@ for _ in range(1):
 
 @Client.on_message(filters.channel & (filters.document | filters.video))
 async def file_receive_handler(client: Client, message: Message):
-    if str(message.chat.id) in Telegram.AUTH_CHANNEL:
+    if str(message.chat.id) in SettingsManager.current().auth_channels:
         try:
             if message.video or (message.document and message.document.mime_type.startswith("video/")):
                 file = message.video or message.document
@@ -78,7 +79,7 @@ async def file_receive_handler(client: Client, message: Message):
 
 @Client.on_edited_message(filters.channel & (filters.document | filters.video))
 async def file_edited_handler(client: Client, message: Message):
-    if str(message.chat.id) in Telegram.AUTH_CHANNEL:
+    if str(message.chat.id) in SettingsManager.current().auth_channels:
         try:
             if message.video or (message.document and message.document.mime_type.startswith("video/")):
                 file = message.video or message.document
@@ -116,7 +117,7 @@ async def file_deleted_handler(client: Client, messages: list[Message]):
     try:
         
         for message in messages:
-            if message.chat and str(message.chat.id) in Telegram.AUTH_CHANNEL:
+            if message.chat and str(message.chat.id) in SettingsManager.current().auth_channels:
                 channel = str(message.chat.id).replace("-100", "")
                 msg_id = message.id
                 

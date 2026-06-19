@@ -18,7 +18,7 @@ from pyrogram.errors import FloodWait, ChannelPrivate, ChatAdminRequired
 from Backend.helper.custom_filter import CustomFilters
 from Backend.logger import LOGGER
 from Backend import db
-from Backend.config import Telegram
+from Backend.helper.settings_manager import SettingsManager
 from Backend.helper.pyro import clean_filename, get_readable_file_size, remove_urls
 from Backend.helper.metadata import metadata
 from Backend.helper.encrypt import encode_string
@@ -278,7 +278,7 @@ async def scan_command(client: Client, message: Message):
     if len(args) > 1:
         target_channels = [args[1].strip()]
     else:
-        target_channels = list(Telegram.AUTH_CHANNEL)
+        target_channels = list(SettingsManager.current().auth_channels)
 
     if not target_channels:
         await message.reply_text("❌ No AUTH_CHANNELs configured.", quote=True)
@@ -361,7 +361,7 @@ async def rescan_command(client: Client, message: Message):
         )
         return
 
-    channels = list(Telegram.AUTH_CHANNEL)
+    channels = list(SettingsManager.current().auth_channels)
     if not channels:
         await message.reply_text("❌ No AUTH_CHANNELs configured.", quote=True)
         return

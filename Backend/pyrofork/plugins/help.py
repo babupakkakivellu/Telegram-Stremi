@@ -1,11 +1,13 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from Backend.config import Telegram
+from Backend.helper.settings_manager import SettingsManager
 from Backend.helper.custom_filter import CustomFilters
+
+
 
 @Client.on_message(filters.command("help"))
 async def help_command(client: Client, message: Message):
-    if Telegram.SUBSCRIPTION:
+    if SettingsManager.current().subscription:
         text = (
             "<b>Bot Commands:</b>\n\n"
             "/start - Main menu / Purchase membership\n"

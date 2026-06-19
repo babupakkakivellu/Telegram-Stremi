@@ -1,7 +1,9 @@
 from fastapi import HTTPException
 from datetime import datetime
 from Backend import db
-from Backend.config import Telegram
+from Backend.helper.settings_manager import SettingsManager
+
+
 
 DAILY_LIMIT_VIDEO = "https://bit.ly/3YZFKT5"
 MONTHLY_LIMIT_VIDEO = "https://bit.ly/4rfjtgd"
@@ -21,7 +23,7 @@ async def verify_token(token: str):
     token_data["subscription_expired"] = False
 
     # --- Subscription expiry check (only when SUBSCRIPTION feature is enabled) ---
-    if Telegram.SUBSCRIPTION:
+    if SettingsManager.current().subscription:
         user_id = token_data.get("user_id")
         if not user_id:
             # Token has no linked user — treat as expired (unverified token)

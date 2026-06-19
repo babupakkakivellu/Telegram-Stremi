@@ -12,7 +12,7 @@ from Backend.fastapi.routes.template_routes import (
     login_page, login_post, logout, set_theme, dashboard_page,
     media_management_page, edit_media_page, public_status_page, stremio_guide_page,
     admin_dashboard_page, admin_subscriptions_page, admin_access_page,
-    custom_catalogs_page
+    custom_catalogs_page, settings_page
 )
 from Backend.fastapi.routes.api_routes import (
     list_media_api, delete_media_api, update_media_api,
@@ -31,7 +31,8 @@ from Backend.fastapi.routes.api_routes import (
     delete_custom_catalog_api, get_custom_catalog_items_api, search_catalog_media_api,
     add_custom_catalog_item_api, remove_custom_catalog_item_api,
     auto_sync_custom_catalogs_api, auto_catalog_sync_status_api,
-    get_auto_catalog_settings_api, update_auto_catalog_settings_api
+    get_auto_catalog_settings_api, update_auto_catalog_settings_api,
+    get_settings_api, update_settings_api
 )
 
 templates = Jinja2Templates(directory="Backend/fastapi/templates")
@@ -371,6 +372,20 @@ async def remove_custom_catalog_item(
     _: bool = Depends(require_auth)
 ):
     return await remove_custom_catalog_item_api(catalog_id, tmdb_id, db_index, media_type)
+
+
+
+@app.get("/admin/settings", response_class=HTMLResponse)
+async def admin_settings(request: Request, _: bool = Depends(require_auth)):
+    return await settings_page(request, _)
+
+@app.get("/api/admin/settings")
+async def get_settings(_: bool = Depends(require_auth)):
+    return await get_settings_api()
+
+@app.put("/api/admin/settings")
+async def update_settings(payload: dict, _: bool = Depends(require_auth)):
+    return await update_settings_api(payload)
 
 @app.exception_handler(401)
 async def auth_exception_handler(request: Request, exc):

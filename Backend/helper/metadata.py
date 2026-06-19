@@ -8,14 +8,15 @@ from typing import Optional, List
 
 from Backend.helper.imdb import get_detail, get_season, search_title, search_title_multi
 from themoviedb import aioTMDb
-from Backend.config import Telegram
+from Backend.helper.settings_manager import SettingsManager
 import Backend
 from Backend.logger import LOGGER
 from Backend.helper.encrypt import encode_string
 
 # ----------------- Configuration -----------------
+
 DELAY = 0
-tmdb = aioTMDb(key=Telegram.TMDB_API, language="en-US", region="US")
+tmdb = aioTMDb(key=SettingsManager.current().tmdb_api, language="en-US", region="US")
 
 # Cache dictionaries (per run)
 IMDB_CACHE: dict = {}

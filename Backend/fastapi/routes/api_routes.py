@@ -1,9 +1,11 @@
 import asyncio
 import json
+from datetime import datetime
 from fastapi import Request, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from Backend import db, StartTime, __version__
 from Backend.logger import LOGGER
+from Backend.helper.settings_manager import SettingsManager
 from Backend.helper.pyro import get_readable_time
 from Backend.helper.metadata import (
     search_movie_candidates,
@@ -20,6 +22,10 @@ from Backend.helper.auto_catalog import (
     get_auto_catalog_settings,
     update_auto_catalog_settings,
 )
+
+from Backend.helper.settings_manager import SettingsManager
+
+
 
 
 # --- API Routes for System Stats ---
@@ -587,9 +593,6 @@ async def manage_subscriber_api(user_id: int, payload: dict) -> dict:
 # --- Access Management API ---
 
 async def get_all_tokens_api() -> dict:
-    from Backend import db
-    from Backend.config import Telegram
-    from datetime import datetime
     try:
         tokens = await db.get_all_api_tokens()
         now = datetime.utcnow()
@@ -597,7 +600,7 @@ async def get_all_tokens_api() -> dict:
 
         # Pre-load all subscribers into a dict keyed by user_id for O(1) lookup
         subscriber_map = {}       # user_id (str) -> user doc
-        if Telegram.SUBSCRIPTION:
+        if SettingsManager.current().subscription:
             try:
                 for u in await db.get_all_subscribers():
                     uid = str(u.get("_id"))
@@ -617,7 +620,7 @@ async def get_all_tokens_api() -> dict:
             return f"User {user_id}" if user_id else "Telegram User"
 
         def build_entry(user_id, user, token_doc):
-            """Build a unified access entry from optional user + token records."""
+            """ a unified access entry from optional user + token records."""
             expiry = None
             sub_status = None
             user_found = bool(user)
@@ -633,7 +636,7 @@ async def get_all_tokens_api() -> dict:
                     expiry = t_expiry
 
             # Determine status
-            if Telegram.SUBSCRIPTION:
+            if SettingsManager.current().subscription:
                 if not user_found:
                     is_expired = True
                 elif sub_status != "active":
@@ -659,7 +662,7 @@ async def get_all_tokens_api() -> dict:
                 "is_expired": is_expired,
                 "sub_status": sub_status,
                 "addon_url": (
-                    f"{Telegram.BASE_URL}/stremio/{token_str}/manifest.json"
+                    f"{SettingsManager.current().base_url}/stremio/{token_str}/manifest.json"
                     if token_str else None
                 ),
             }
@@ -965,3 +968,85 @@ async def update_auto_catalog_settings_api(payload: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings API
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_settings_api() -> dict:
+
+    data = SettingsManager.current().to_dict()
+    # Never expose the raw password — let the UI know whether one is set
+    data["admin_password_set"] = bool(data.get("admin_password"))
+    data["admin_password"] = ""
+
+    try:
+        data["database_list"] = db.get_database_list()
+    except Exception as e:
+        LOGGER.error(f"get_settings_api: could not load database list: {e}")
+        data["database_list"] = []
+
+    return {"settings": data}
+
+
+async def update_settings_api(payload: dict) -> dict:
+
+    # Empty password string → don't change it
+    if "admin_password" in payload and not str(payload["admin_password"]).strip():
+        del payload["admin_password"]
+
+    # ── Type coercion & validation ────────────────────────────────────────────
+    bool_keys = {"replace_mode", "hide_catalog", "subscription", "show_proxy_and_non_proxy_both"}
+    for key in bool_keys:
+        if key in payload:
+            payload[key] = bool(payload[key])
+
+    list_str_keys = {"auth_channels", "multi_tokens", "extra_databases"}
+    for key in list_str_keys:
+        if key in payload:
+            if not isinstance(payload[key], list):
+                raise HTTPException(status_code=400, detail=f"'{key}' must be a list.")
+            payload[key] = [str(v).strip() for v in payload[key] if str(v).strip()]
+
+    if "extra_databases" in payload:
+        for uri in payload["extra_databases"]:
+            if not uri.startswith(("mongodb://", "mongodb+srv://")):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid database URI (must start with mongodb:// or mongodb+srv://): {uri[:30]}…"
+                )
+
+    if "approver_ids" in payload:
+        if not isinstance(payload["approver_ids"], list):
+            raise HTTPException(status_code=400, detail="'approver_ids' must be a list.")
+        try:
+            payload["approver_ids"] = [int(v) for v in payload["approver_ids"] if str(v).strip()]
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="All approver_ids must be integers.")
+
+    if "subscription_group_id" in payload:
+        try:
+            payload["subscription_group_id"] = int(payload["subscription_group_id"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="'subscription_group_id' must be an integer.")
+
+    # Strip whitespace from string fields
+    for key in ("tmdb_api", "base_url", "upstream_repo", "upstream_branch",
+                "admin_username", "admin_password", "http_proxy_url", "subscription_url"):
+        if key in payload and isinstance(payload[key], str):
+            payload[key] = payload[key].strip()
+
+    try:
+        reinit_results = await SettingsManager.update(db, payload)
+        return {
+            "message": "Settings saved successfully.",
+            "reinit": reinit_results,
+        }
+    except ValueError as exc:
+        # Raised by db.reload_extra_databases() for unsafe/invalid DB changes
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
