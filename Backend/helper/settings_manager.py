@@ -19,6 +19,8 @@ _DEFAULTS: Dict[str, Any] = {
     "subscription_group_id": 0,
     "subscription_url": "https://t.me/",
     "approver_ids": [],
+    "payment_instructions": "",
+    "payment_qr_url": "",
     "http_proxy_url": "",
     "show_proxy_and_non_proxy_both": False,
     "multi_tokens": [],
@@ -124,6 +126,14 @@ class Settings:
     @property
     def subscription_url(self) -> str:
         return str(self._d.get("subscription_url") or "https://t.me/")
+
+    @property
+    def payment_instructions(self) -> str:
+        return str(self._d.get("payment_instructions") or "")
+
+    @property
+    def payment_qr_url(self) -> str:
+        return str(self._d.get("payment_qr_url") or "")
 
     # ── Integers ─────────────────────────────────────────────────────────────
     @property
@@ -269,7 +279,8 @@ class SettingsManager:
                 LOGGER.error(f"SettingsManager reinit subscription: {exc}")
                 results["subscription"] = f"error: {exc}"
         else:
-            sub_keys = {"subscription_group_id", "approver_ids", "subscription_url"}
+            sub_keys = {"subscription_group_id", "approver_ids", "subscription_url",
+                        "payment_instructions", "payment_qr_url"}
             if any(old.get(k) != new.get(k) for k in sub_keys):
                 results["subscription"] = "settings reloaded in-memory"
 
