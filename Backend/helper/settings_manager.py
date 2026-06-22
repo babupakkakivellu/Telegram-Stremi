@@ -23,6 +23,8 @@ _DEFAULTS: Dict[str, Any] = {
     "show_proxy_and_non_proxy_both": False,
     "multi_tokens": [],
     "extra_databases": [],
+    "global_search": False,
+    "global_search_channels": [],
 }
 
 
@@ -45,6 +47,7 @@ def _seed_from_env() -> Dict[str, Any]:
         "subscription_group_id":        Telegram.SUBSCRIPTION_GROUP_ID,
         "subscription_url":             Telegram.SUBSCRIPTION_URL,
         "approver_ids":                 list(Telegram.APPROVER_IDS),
+        "global_search_channels":       [],
         "http_proxy_url":               Telegram.HTTP_PROXY_URL,
         "show_proxy_and_non_proxy_both": Telegram.SHOW_PROXY_AND_NON_PROXY_BOTH,
         "multi_tokens":                 [],
@@ -80,6 +83,14 @@ class Settings:
     @property
     def show_proxy_and_non_proxy_both(self) -> bool:
         return bool(self._d["show_proxy_and_non_proxy_both"])
+
+    @property
+    def global_search(self) -> bool:
+        return bool(self._d.get("global_search", False))
+
+    @property
+    def global_search_channels(self):
+        return list(self._d.get("global_search_channels") or [])
 
     # ── Strings ──────────────────────────────────────────────────────────────
     @property
@@ -183,6 +194,18 @@ class SettingsManager:
 
         results: Dict[str, str] = {}
 
+        # Global Search hard requires a Userbot session — never trust the
+        # client to have enforced this; guard it here too.
+        if merged.get("global_search"):
+            from Backend.config import Telegram
+            if not Telegram.USER_SESSION_STRING:
+                merged["global_search"] = False
+                LOGGER.warning(
+                    "SettingsManager: rejected global_search=True — "
+                    "USER_SESSION_STRING is not configured."
+                )
+                results["global_search"] = "rejected — no Userbot session configured"
+
         # ── Phase 1: validate / apply things that can abort the save ───────
         old_extra = old.get("extra_databases") or []
         new_extra = merged.get("extra_databases") or []
@@ -254,5 +277,10 @@ class SettingsManager:
         cred_keys = {"admin_username", "admin_password"}
         if any(old.get(k) != new.get(k) for k in cred_keys):
             results["admin_credentials"] = "updated — takes effect on next login"
+
+        # Global Search toggle changed (only meaningful logging here; the
+        # search module reads SettingsManager.current() live each call)
+        if old.get("global_search") != new.get("global_search") and "global_search" not in results:
+            results["global_search"] = "enabled" if new.get("global_search") else "disabled"
 
         return results
