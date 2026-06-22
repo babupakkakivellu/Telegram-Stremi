@@ -185,7 +185,10 @@ async def edit_media_page(request: Request, tmdb_id: int, db_index: int, media_t
             raise HTTPException(status_code=404, detail="Media not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+    api_tokens = await db.get_all_api_tokens()
+    api_token = api_tokens[0].get("token") if api_tokens else None
+
     return templates.TemplateResponse("media_edit.html", {
         "request": request,
         "theme": theme,
@@ -195,7 +198,8 @@ async def edit_media_page(request: Request, tmdb_id: int, db_index: int, media_t
         "tmdb_id": tmdb_id,
         "db_index": db_index,
         "media_type": media_type,
-        "media_details": media_details
+        "media_details": media_details,
+        "api_token": api_token
     })
 
 async def public_status_page(request: Request):
