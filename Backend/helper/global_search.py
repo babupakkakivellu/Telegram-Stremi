@@ -35,6 +35,7 @@ _userbot_session_dead = False
 _chat_title_cache: Dict[int, str] = {}
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+_MULTIPART_RE = re.compile(r"(?:part|cd|disc|disk)[s._-]*\d+(?=\.\w+$)", re.IGNORECASE)
 
 
 # ── Availability ──────────────────────────────────────────────────────────────
@@ -97,10 +98,21 @@ def _parse_and_validate(
     season: Optional[int],
     episode: Optional[int],
 ) -> Optional[dict]:
+    # Skip split files (e.g. Part1, CD2, Disc3)
+    if _MULTIPART_RE.search(filename):
+        LOGGER.info(f"Skipping {filename}: seems to be a split video file")
+        return None
+
     try:
         parsed = PTN.parse(filename)
     except Exception:
         return None
+
+    # Skip files marked as combined in PTN excess tags
+    if "excess" in parsed and any("combined" in item.lower() for item in parsed["excess"]):
+        LOGGER.info(f"Skipping {filename}: contains 'combined'")
+        return None
+
     if not _matches_episode(parsed, season, episode):
         return None
     if _title_score(parsed.get("title", ""), expected_title) < MIN_TITLE_SCORE:
