@@ -1049,7 +1049,8 @@ async def update_settings_api(payload: dict) -> dict:
 
     # Strip whitespace from string fields
     for key in ("tmdb_api", "base_url", "upstream_repo", "upstream_branch",
-                "admin_username", "admin_password", "http_proxy_url", "subscription_url"):
+                "admin_username", "admin_password", "http_proxy_url", "subscription_url",
+                "payment_instructions", "payment_qr_url"):
         if key in payload and isinstance(payload[key], str):
             payload[key] = payload[key].strip()
 
