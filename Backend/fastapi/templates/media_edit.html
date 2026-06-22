@@ -985,7 +985,7 @@
         const token = getCopylinkToken();
 
         if (!token) {
-            showErrorMessage('No API token found. Please copy the link from the Dashboard page.');
+            showErrorMessage('No API token found. Please create an API token on the Dashboard page first.');
             return;
         }
 
@@ -1000,7 +1000,8 @@
     }
 
     function getCopylinkToken() {
-        return sessionStorage.getItem('api_token') || localStorage.getItem('api_token') || null;
+        const serverToken = {{ (api_token | tojson) if api_token else 'null' }};
+        return serverToken || sessionStorage.getItem('api_token') || localStorage.getItem('api_token') || null;
     }
 
 
