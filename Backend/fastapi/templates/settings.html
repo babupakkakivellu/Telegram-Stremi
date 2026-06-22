@@ -258,6 +258,25 @@
                 </div>
             </div>
 
+            <!-- Payment method -->
+            <div style="margin-bottom:1rem">
+                <label class="s-label" for="payment_instructions">Payment Instructions
+                    <span style="font-weight:400;text-transform:none;letter-spacing:0">
+                        — shown to users when they pick a plan (UPI ID, bank details, etc.)</span>
+                </label>
+                <textarea id="payment_instructions" class="s-input" rows="4"
+                    placeholder="e.g. UPI: yourname@okhdfcbank&#10;Or PayPal: you@example.com&#10;After paying, send the screenshot here.">{{ settings.payment_instructions }}</textarea>
+            </div>
+            <div style="margin-bottom:1rem">
+                <label class="s-label" for="payment_qr_url">Payment QR Image URL
+                    <span style="font-weight:400;text-transform:none;letter-spacing:0">
+                        — optional; if set, the bot sends this QR image with the plan</span>
+                </label>
+                <input type="url" id="payment_qr_url" class="s-input"
+                    value="{{ settings.payment_qr_url }}"
+                    placeholder="https://.../upi-qr.png">
+            </div>
+
             <!-- Approver IDs -->
             <label class="s-label">APPROVER_IDS
                 <span style="font-weight:400;text-transform:none;letter-spacing:0">
@@ -585,6 +604,8 @@ async function saveSettings() {
         subscription:                  document.getElementById('subscription').checked,
         subscription_group_id:         parseInt(document.getElementById('subscription_group_id').value || '0', 10),
         subscription_url:              document.getElementById('subscription_url').value.trim(),
+        payment_instructions:          document.getElementById('payment_instructions').value.trim(),
+        payment_qr_url:                document.getElementById('payment_qr_url').value.trim(),
         approver_ids:                  collectList('approver_ids').map(Number),
         http_proxy_url:                document.getElementById('http_proxy_url').value.trim(),
         show_proxy_and_non_proxy_both: document.getElementById('show_proxy_and_non_proxy_both').checked,
