@@ -45,14 +45,24 @@ async def plan_selection(client: Client, callback_query: CallbackQuery):
 
     expiry_str = new_expiry.strftime("%Y-%m-%d %H:%M UTC")
 
+    settings = SettingsManager.current()
+    payment_instructions = settings.payment_instructions
+    payment_qr_url = settings.payment_qr_url
+
     text = (
         f"<b>✅ Plan Selected: {plan['days']} Days</b>\n\n"
         f"<b>💰 Price:</b> ₹{plan['price']}\n"
         f"<b>📅 Expiry (if approved now):</b> {expiry_str}\n\n"
-        f"<b>📋 Payment Instructions:</b>\n"
-        f"1. Pay ₹{plan['price']} to the admin.\n"
-        f"2. <b>Send your payment screenshot directly here (in this chat)</b>.\n"
-        f"   The admin will review and activate your subscription."
+        f"<b>📋 How to Pay:</b>\n"
+    )
+    if payment_instructions:
+        text += f"{payment_instructions}\n\n"
+    else:
+        # No payment method configured by the admin — show a safe fallback.
+        text += f"Pay ₹{plan['price']} to the admin.\n\n"
+    text += (
+        f"<b>After paying:</b> send your payment screenshot directly here "
+        f"(in this chat). The admin will review and activate your subscription."
     )
 
     # Set pending payment state (price stored for admin display)
@@ -62,9 +72,18 @@ async def plan_selection(client: Client, callback_query: CallbackQuery):
     dm_sent = False
     from pyrogram.types import ForceReply
 
-    # Always try to DM the user directly so the screenshot handler (filters.private) picks it up
-    dm_sent = False
     try:
+        # Send the QR image first (if the admin configured one) so it appears
+        # above the instructions.
+        if payment_qr_url:
+            try:
+                await client.send_photo(
+                    chat_id=user_id,
+                    photo=payment_qr_url,
+                    caption=f"📷 Scan to pay ₹{plan['price']}",
+                )
+            except Exception as qe:
+                print(f"Could not send payment QR to {user_id}: {qe}")
         await client.send_message(
             chat_id=user_id,
             text=text,
