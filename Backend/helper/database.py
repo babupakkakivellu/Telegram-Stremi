@@ -82,7 +82,6 @@ class Database:
 
 
     async def get_settings(self) -> dict:
-        """Return the full runtime settings document, or {} if none exists yet."""
         try:
             doc = await self.dbs["tracking"]["settings"].find_one({"_id": "app_settings"})
             return doc or {}
@@ -91,10 +90,6 @@ class Database:
             return {}
 
     async def save_settings(self, settings: dict) -> bool:
-        """
-        Persist *settings* to the tracking database.
-        Uses upsert so the first call creates the document automatically.
-        """
         try:
             clean = {k: v for k, v in settings.items() if k != "_id"}
             await self.dbs["tracking"]["settings"].update_one(
@@ -110,9 +105,6 @@ class Database:
 
 
     async def connect_storage_db(self, uri: str, index: int) -> bool:
-        """Connect and register a single database at `index`. Verifies the
-        connection actually works (via a ping) before registering it, so a
-        bad URI never leaves stale half-registered state behind."""
         try:
             client = motor.motor_asyncio.AsyncIOMotorClient(uri)
             await client.admin.command("ping")
@@ -130,8 +122,6 @@ class Database:
             return False
 
     async def disconnect_storage_db(self, index: int) -> None:
-        """Close and unregister the storage database at `index`. Never call
-        this with index 0 or 1 — those are the locked essential databases."""
         db_key = f"storage_{index}"
         client = self.clients.pop(db_key, None)
         self.dbs.pop(db_key, None)
@@ -140,14 +130,6 @@ class Database:
             LOGGER.info(f"Disconnected {db_key}.")
 
     def get_database_list(self) -> List[Dict[str, Any]]:
-        """
-        Return every configured database for the admin Settings page.
-
-        Locked entries (tracking + storage_1) only expose a masked URI since
-        they're never editable. Unlocked "extra" entries also include the
-        full, unmasked URI (`full_uri`) so the admin can actually edit it in
-        the Settings panel — they're already authenticated, so this is safe.
-        """
         result = []
         for index, uri in enumerate(self.db_uris):
             masked = re.sub(r"://(.*?):.*?@", r"://\1:*****@", uri).split('?')[0]
@@ -165,15 +147,6 @@ class Database:
         return result
 
     async def reload_extra_databases(self, new_extra_uris: List[str]) -> Dict[str, Any]:
-        """
-        Hot-reload additional storage databases (index >= 2) without touching
-        the locked tracking (0) and storage_1 (1) databases.
-
-        Raises ValueError (caught by SettingsManager / the API layer and
-        reported to the admin) if the requested change would alter or remove
-        a database that isn't at the end of the list, or if a new database
-        URI fails to connect.
-        """
         old_extra = self.db_uris[2:]
         new_extra = [u.strip() for u in (new_extra_uris or []) if u and u.strip()]
 
@@ -210,10 +183,6 @@ class Database:
         message = f"{added} database(s) added, {removed} database(s) removed."
         LOGGER.info(f"reload_extra_databases: {message}")
         return {"added": added, "removed": removed, "message": message}
-
-
-
-
 
     # -------------------------------
     # User Subscription Management
@@ -425,9 +394,6 @@ class Database:
             "subscription_status": "active",
             "days_assigned": days,
         }
-
-
-
 
     # -------------------------------
     # Custom Catalog Management
@@ -693,9 +659,6 @@ class Database:
     # -------------------------------
 
     async def _build_part_id_and_size(self, parts: List[dict]) -> Tuple[str, str]:
-        """Given a list of part dicts (chat_id, msg_id, part_number, size_bytes),
-        produce the aggregate opaque stream `id` (encoding all parts, ordered)
-        and the human-readable total size string."""
         sorted_parts = sorted(parts, key=lambda p: p.get("part_number", 0))
         payload = {"parts": [{"chat_id": p["chat_id"], "msg_id": p["msg_id"]} for p in sorted_parts]}
         encoded = await encode_string(payload)
@@ -705,10 +668,6 @@ class Database:
         return encoded, size_str
 
     async def remove_media_part(self, channel: int, msg_id: int) -> bool:
-        """Remove a single Telegram message from the database, whether it was
-        stored as a standalone quality entry (legacy single-file) or as one
-        part of a multi-part split-file quality entry. Mirrors
-        delete_media_by_stream_id's cleanup-cascading behaviour."""
         try:
             legacy_hash = await encode_string({"chat_id": channel, "msg_id": msg_id})
             if await self.delete_media_by_stream_id(legacy_hash):
@@ -857,9 +816,6 @@ class Database:
             return await self.update_tv_show(tv_show)
 
     async def _merge_split_part(self, qualities: List[dict], quality_to_update: dict) -> List[dict]:
-        """Merge an incoming split-part QualityDetail into the matching
-        group (by group_key) within `qualities`, or append it as the first
-        part of a new group. Returns the updated qualities list."""
         group_key = quality_to_update.get("group_key")
         incoming_parts = quality_to_update.get("parts") or []
         if not incoming_parts:
@@ -1368,6 +1324,32 @@ class Database:
                     return False
             raise
 
+    async def _queue_quality_deletion(self, quality: dict) -> None:
+        try:
+            old_id = quality.get("id")
+            if not old_id:
+                return
+
+            decoded_data = await decode_string(old_id)
+
+            # Split-file: a list of parts, each its own Telegram message.
+            if isinstance(decoded_data, dict) and decoded_data.get("parts"):
+                for part in decoded_data["parts"]:
+                    try:
+                        chat_id = int(f"-100{part['chat_id']}")
+                        msg_id = int(part["msg_id"])
+                        create_task(delete_message(chat_id, msg_id))
+                    except Exception as e:
+                        LOGGER.error(f"Failed to queue split-file part for deletion: {e}")
+                return
+
+            
+            chat_id = int(f"-100{decoded_data['chat_id']}")
+            msg_id = int(decoded_data["msg_id"])
+            create_task(delete_message(chat_id, msg_id))
+        except Exception as e:
+            LOGGER.error(f"Failed to queue file for deletion: {e}")
+
     async def delete_document(self, media_type: str, tmdb_id: int, db_index: int) -> bool:
         db_key = f"storage_{db_index}"
 
@@ -1375,15 +1357,7 @@ class Database:
             doc = await self.dbs[db_key]["movie"].find_one({"tmdb_id": tmdb_id})
             if doc and "telegram" in doc:
                 for quality in doc["telegram"]:
-                    try:
-                        old_id = quality.get("id")
-                        if old_id:
-                            decoded_data = await decode_string(old_id)
-                            chat_id = int(f"-100{decoded_data['chat_id']}")
-                            msg_id = int(decoded_data['msg_id'])
-                            create_task(delete_message(chat_id, msg_id))
-                    except Exception as e:
-                        LOGGER.error(f"Failed to queue file for deletion: {e}")
+                    await self._queue_quality_deletion(quality)
             
             result = await self.dbs[db_key]["movie"].delete_one({"tmdb_id": tmdb_id})
         else:
@@ -1392,15 +1366,7 @@ class Database:
                 for season in doc["seasons"]:
                     for episode in season.get("episodes", []):
                         for quality in episode.get("telegram", []):
-                            try:
-                                old_id = quality.get("id")
-                                if old_id:
-                                    decoded_data = await decode_string(old_id)
-                                    chat_id = int(f"-100{decoded_data['chat_id']}")
-                                    msg_id = int(decoded_data['msg_id'])
-                                    create_task(delete_message(chat_id, msg_id))
-                            except Exception as e:
-                                LOGGER.error(f"Failed to queue file for deletion: {e}")
+                            await self._queue_quality_deletion(quality)
             
             result = await self.dbs[db_key]["tv"].delete_one({"tmdb_id": tmdb_id})
         
@@ -1411,8 +1377,6 @@ class Database:
         return False
 
     async def get_title_by_stream_id(self, stream_id_hash: str) -> Optional[str]:
-        """Look up the original media title across all storage DBs using the telegram file ID hash.
-        For TV shows, it includes the Season and Episode number in the title."""
         for i in range(1, self.current_db_index + 1):
             db = self.dbs[f"storage_{i}"]
             
@@ -1438,8 +1402,6 @@ class Database:
         return None
 
     async def delete_media_by_stream_id(self, stream_id_hash: str) -> bool:
-        """Finds and removes a specific stream quality by its hash across all DBs. 
-        If it's the last quality, it cleans up the movie or episode/season/show."""
         for i in range(1, self.current_db_index + 1):
             db = self.dbs[f"storage_{i}"]
             
@@ -1483,15 +1445,7 @@ class Database:
 
         for q in movie["telegram"]:
             if q.get("id") == id:
-                try:
-                    old_id = q.get("id")
-                    if old_id:
-                        decoded_data = await decode_string(old_id)
-                        chat_id = int(f"-100{decoded_data['chat_id']}")
-                        msg_id = int(decoded_data['msg_id'])
-                        create_task(delete_message(chat_id, msg_id))
-                except Exception as e:
-                    LOGGER.error(f"Failed to queue file for deletion: {e}")
+                await self._queue_quality_deletion(q)
                 break
         
         original_len = len(movie["telegram"])
@@ -1517,15 +1471,7 @@ class Database:
                 for ep in season["episodes"]:
                     if ep.get("episode_number") == episode_number:
                         for quality in ep.get("telegram", []):
-                            try:
-                                old_id = quality.get("id")
-                                if old_id:
-                                    decoded_data = await decode_string(old_id)
-                                    chat_id = int(f"-100{decoded_data['chat_id']}")
-                                    msg_id = int(decoded_data['msg_id'])
-                                    create_task(delete_message(chat_id, msg_id))
-                            except Exception as e:
-                                LOGGER.error(f"Failed to queue file for deletion: {e}")
+                            await self._queue_quality_deletion(quality)
                         break
                 
                 original_len = len(season["episodes"])
@@ -1551,15 +1497,7 @@ class Database:
             if season.get("season_number") == season_number:
                 for episode in season.get("episodes", []):
                     for quality in episode.get("telegram", []):
-                        try:
-                            old_id = quality.get("id")
-                            if old_id:
-                                decoded_data = await decode_string(old_id)
-                                chat_id = int(f"-100{decoded_data['chat_id']}")
-                                msg_id = int(decoded_data['msg_id'])
-                                create_task(delete_message(chat_id, msg_id))
-                        except Exception as e:
-                            LOGGER.error(f"Failed to queue file for deletion: {e}")
+                        await self._queue_quality_deletion(quality)
                 break
         
         original_len = len(tv["seasons"])
@@ -1586,15 +1524,7 @@ class Database:
                     if episode.get("episode_number") == episode_number and "telegram" in episode:
                         for q in episode["telegram"]:
                             if q.get("id") == id:
-                                try:
-                                    old_id = q.get("id")
-                                    if old_id:
-                                        decoded_data = await decode_string(old_id)
-                                        chat_id = int(f"-100{decoded_data['chat_id']}")
-                                        msg_id = int(decoded_data['msg_id'])
-                                        create_task(delete_message(chat_id, msg_id))
-                                except Exception as e:
-                                    LOGGER.error(f"Failed to queue file for deletion: {e}")
+                                await self._queue_quality_deletion(q)
                                 break
                         
                         original_len = len(episode["telegram"])
