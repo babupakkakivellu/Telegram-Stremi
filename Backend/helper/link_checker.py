@@ -88,30 +88,42 @@ class DeadLinkChecker:
                 LOGGER.error(f"Error scanning TV shows in DB {i}: {e}")
 
     async def _check_file_alive(self, client, quality_id: str) -> bool:
-        """
-        Decodes the quality_id to a Telegram chat_id and message_id,
-        then attempts to fetch the message to see if it (and its media) still exist.
-        """
         try:
             decoded = await decode_string(quality_id)
-            if not decoded or "chat_id" not in decoded or "msg_id" not in decoded:
-                return False
-                
-            chat_id = int(f"-100{decoded['chat_id']}")
-            msg_id = int(decoded["msg_id"])
-
-            # Use get_messages to fetch exactly one message
-            messages = await client.get_messages(chat_id, message_ids=[msg_id])
-            if not messages or len(messages) == 0:
-                return False
-                
-            msg = messages[0]
-            if msg.empty or (msg.document is None and msg.video is None and msg.audio is None):
+            if not decoded:
                 return False
 
-            return True
+        # Split file: payload has a "parts" list of {chat_id, msg_id}
+            if "parts" in decoded:
+                parts = decoded.get("parts") or []
+                if not parts:
+                    return False
+                for part in parts:
+                    if not await self._check_single_message(
+                        client, part.get("chat_id"), part.get("msg_id")
+                    ):
+                        return False          # any missing part => dead
+                return True
 
+        # Single file
+            if "chat_id" not in decoded or "msg_id" not in decoded:
+                return False
+            return await self._check_single_message(
+                client, decoded["chat_id"], decoded["msg_id"]
+            )
         except Exception as e:
-            # If the channel is banned, chat_id is invalid, or any other critical error occurs
             LOGGER.error(f"Link checker failed to resolve {quality_id}: {e}")
             return False
+
+    async def _check_single_message(self, client, chat_id, msg_id) -> bool:
+        if chat_id is None or msg_id is None:
+            return False
+        chat_id = int(f"-100{chat_id}")
+        msg_id = int(msg_id)
+        messages = await client.get_messages(chat_id, message_ids=[msg_id])
+        if not messages:
+            return False
+        msg = messages[0]
+        if msg.empty or (msg.document is None and msg.video is None and msg.audio is None):
+            return False
+        return True
