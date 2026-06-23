@@ -520,6 +520,7 @@ async def fetch_tv_metadata(title, season, episode, encoded_string, year=None, q
     imdb_tv = None
     imdb_ep = None
     use_tmdb = False
+    explicit_imdb_id = False
 
     # ------------------------------------------------------------------
     # 1. Handle explicit default ID
@@ -528,6 +529,7 @@ async def fetch_tv_metadata(title, season, episode, encoded_string, year=None, q
         default_id = str(default_id)
         if default_id.startswith("tt"):
             imdb_id = default_id
+            explicit_imdb_id = True
         elif default_id.isdigit():
             tmdb_id = int(default_id)
             use_tmdb = True
@@ -567,9 +569,11 @@ async def fetch_tv_metadata(title, season, episode, encoded_string, year=None, q
 
     # ------------------------------------------------------------------
     # 4. Validate IMDb result against query title (guard against Cinemeta
-    #    returning a stale wrong hit despite the fuzzy pre-filter)
+    #    returning a stale wrong hit despite the fuzzy pre-filter).
+    #    Skipped when the IMDb ID was supplied explicitly, since the user
+    #    deliberately chose that exact ID.
     # ------------------------------------------------------------------
-    if imdb_tv and not use_tmdb:
+    if imdb_tv and not use_tmdb and not explicit_imdb_id:
         matched_title = imdb_tv.get("title", "")
         sim = _title_similarity(title, matched_title)
         if sim < _CINEMETA_THRESHOLD:
@@ -690,6 +694,7 @@ async def fetch_movie_metadata(title, encoded_string, year=None, quality=None, d
     tmdb_id = None
     imdb_details = None
     use_tmdb = False
+    explicit_imdb_id = False
 
     # ------------------------------------------------------------------
     # 1. Explicit default ID
@@ -698,6 +703,7 @@ async def fetch_movie_metadata(title, encoded_string, year=None, quality=None, d
         default_id = str(default_id).strip()
         if default_id.startswith("tt"):
             imdb_id = default_id
+            explicit_imdb_id = True
         elif default_id.isdigit():
             tmdb_id = int(default_id)
             use_tmdb = True
@@ -728,8 +734,10 @@ async def fetch_movie_metadata(title, encoded_string, year=None, quality=None, d
 
     # ------------------------------------------------------------------
     # 4. Validate IMDb result title against query
+    #    (skipped when the IMDb ID was supplied explicitly — e.g. manual
+    #     /set or web "Rescan Metadata" — since the user chose the exact ID)
     # ------------------------------------------------------------------
-    if imdb_details and not use_tmdb:
+    if imdb_details and not use_tmdb and not explicit_imdb_id:
         matched_title = imdb_details.get("title", "")
         sim = _title_similarity(title, matched_title)
         if sim < _CINEMETA_THRESHOLD:
