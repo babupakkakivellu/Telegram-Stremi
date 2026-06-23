@@ -844,12 +844,6 @@ class Database:
         return result
 
     async def _delete_quality_media(self, quality: dict) -> None:
-        """Delete the underlying Telegram message(s) backing a single quality entry.
-
-        Works for both normal (single message) entries and split groups (one
-        message per part). Failures are logged but never raised so a failed
-        Telegram delete can't abort the database update.
-        """
         parts = quality.get("parts")
         if parts:
             for part in parts:
@@ -875,18 +869,6 @@ class Database:
     async def _apply_quality_update(
         self, existing_qualities: List[dict], quality_to_update: dict
     ) -> List[dict]:
-        """Merge an incoming quality entry into an existing list of qualities.
-
-        Handles three scenarios:
-          * Incoming split part: merge with the matching split group. When
-            REPLACE_MODE is on, any other version of the same quality (a normal
-            file or a different split group) is deleted first so only the new
-            split group survives.
-          * Incoming normal file with REPLACE_MODE on: delete every existing
-            entry of the same quality (normal file or split group, including all
-            split parts) and keep only the new normal file.
-          * REPLACE_MODE off: keep existing entries and append the new one.
-        """
         target_quality = quality_to_update.get("quality")
         incoming_group_key = quality_to_update.get("group_key")
         replace_mode = SettingsManager.current().replace_mode
@@ -894,9 +876,6 @@ class Database:
         if incoming_group_key:
             # Incoming is a split part.
             if replace_mode:
-                # Remove any other version of this quality (a normal file or a
-                # different split group); the matching split group is preserved
-                # so its parts can be merged below.
                 stale = [
                     q for q in existing_qualities
                     if q.get("quality") == target_quality
