@@ -789,8 +789,7 @@
             showErrorMessage('Please select a match first.');
             return;
         }
-
-        const selectedId = selectedRescanMatch.imdb_id || selectedRescanMatch.tmdb_id;
+        const selectedId = selectedRescanMatch.tmdb_id || selectedRescanMatch.imdb_id;
         if (!selectedId) {
             showErrorMessage('Selected match does not contain a valid IMDb/TMDb id.');
             return;
