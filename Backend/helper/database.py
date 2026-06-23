@@ -1874,21 +1874,27 @@ class Database:
 
         current_doc.pop("_id", None)
 
+        def _pick(key: str):
+            new_value = metadata.get(key)
+            if new_value in (None, "", [], {}, 0, 0.0, "0"):
+                return current_doc.get(key)
+            return new_value
+
         if collection_name == "movie":
             preserved_telegram = current_doc.get("telegram", [])
             current_doc.update({
                 "tmdb_id": int(metadata.get("tmdb_id") or tmdb_id),
-                "imdb_id": metadata.get("imdb_id"),
-                "title": metadata.get("title") or current_doc.get("title"),
-                "release_year": metadata.get("release_year", current_doc.get("release_year")),
-                "rating": metadata.get("rating", current_doc.get("rating")),
-                "description": metadata.get("description", current_doc.get("description")),
-                "poster": metadata.get("poster", current_doc.get("poster")),
-                "backdrop": metadata.get("backdrop", current_doc.get("backdrop")),
-                "logo": metadata.get("logo", current_doc.get("logo")),
-                "genres": metadata.get("genres", current_doc.get("genres", [])),
-                "cast": metadata.get("cast", current_doc.get("cast", [])),
-                "runtime": metadata.get("runtime", current_doc.get("runtime")),
+                "imdb_id": _pick("imdb_id"),
+                "title": _pick("title"),
+                "release_year": _pick("release_year"),
+                "rating": _pick("rating"),
+                "description": _pick("description"),
+                "poster": _pick("poster"),
+                "backdrop": _pick("backdrop"),
+                "logo": _pick("logo"),
+                "genres": _pick("genres"),
+                "cast": _pick("cast"),
+                "runtime": _pick("runtime"),
                 "media_type": "movie",
                 "telegram": preserved_telegram,
                 "updated_on": datetime.utcnow(),
@@ -1897,17 +1903,17 @@ class Database:
             preserved_seasons = current_doc.get("seasons", [])
             current_doc.update({
                 "tmdb_id": int(metadata.get("tmdb_id") or tmdb_id) if metadata.get("tmdb_id") else int(tmdb_id),
-                "imdb_id": metadata.get("imdb_id"),
-                "title": metadata.get("title") or current_doc.get("title"),
-                "release_year": metadata.get("release_year", current_doc.get("release_year")),
-                "rating": metadata.get("rating", current_doc.get("rating")),
-                "description": metadata.get("description", current_doc.get("description")),
-                "poster": metadata.get("poster", current_doc.get("poster")),
-                "backdrop": metadata.get("backdrop", current_doc.get("backdrop")),
-                "logo": metadata.get("logo", current_doc.get("logo")),
-                "genres": metadata.get("genres", current_doc.get("genres", [])),
-                "cast": metadata.get("cast", current_doc.get("cast", [])),
-                "runtime": metadata.get("runtime", current_doc.get("runtime")),
+                "imdb_id": _pick("imdb_id"),
+                "title": _pick("title"),
+                "release_year": _pick("release_year"),
+                "rating": _pick("rating"),
+                "description": _pick("description"),
+                "poster": _pick("poster"),
+                "backdrop": _pick("backdrop"),
+                "logo": _pick("logo"),
+                "genres": _pick("genres"),
+                "cast": _pick("cast"),
+                "runtime": _pick("runtime"),
                 "media_type": "tv",
                 "seasons": preserved_seasons,
                 "updated_on": datetime.utcnow(),
