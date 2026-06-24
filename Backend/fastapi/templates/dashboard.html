@@ -243,19 +243,19 @@
                     <div class="md:col-span-2">
                         <label class="text-[10px] font-bold uppercase text-text-secondary tracking-widest ml-2 mb-1 block">Token Alias</label>
                         <input type="text" id="token-name" placeholder="E.g., Living Room TV" required
-                            class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-sm text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--background)_12%)]">
+                            class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-sm text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--bg)_12%)]">
                     </div>
 
                     <div>
                         <label class="text-[10px] font-bold uppercase text-text-secondary tracking-widest ml-2 mb-1 block">Daily (GB)</label>
                         <input type="number" id="daily-limit" value="0" step="0.1" min="0"
-                            class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-sm text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--background)_12%)]">
+                            class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-sm text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--bg)_12%)]">
                     </div>
 
                     <div>
                         <label class="text-[10px] font-bold uppercase text-text-secondary tracking-widest ml-2 mb-1 block">Monthly (GB)</label>
                         <input type="number" id="monthly-limit" value="0" step="0.1" min="0"
-                            class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-sm text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--background)_12%)]">
+                            class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-sm text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--bg)_12%)]">
                     </div>
 
                     <div class="flex gap-2">
@@ -409,12 +409,12 @@
             <div>
                 <label class="text-[10px] font-bold uppercase text-text-secondary tracking-widest ml-1 mb-1 block">Daily Limit (GB)</label>
                 <input type="number" id="edit-daily" step="0.1" min="0"
-                    class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--background)_12%)]">
+                    class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--bg)_12%)]">
             </div>
             <div>
                 <label class="text-[10px] font-bold uppercase text-text-secondary tracking-widest ml-1 mb-1 block">Monthly Limit (GB)</label>
                 <input type="number" id="edit-monthly" step="0.1" min="0"
-                    class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--background)_12%)]">
+                    class="w-full px-4 py-3 rounded-xl border border-white/10 focus:border-primary outline-none text-text placeholder:text-text-secondary bg-[color-mix(in_srgb,var(--card)_88%,var(--bg)_12%)]">
             </div>
         </div>
 
@@ -458,7 +458,7 @@
         color: var(--text) !important;
         border-color: var(--border) !important;
         caret-color: var(--primary);
-        background: color-mix(in srgb, var(--card) 88%, var(--background) 12%);
+        background: color-mix(in srgb, var(--card) 88%, var(--bg) 12%);
     }
 
     input[type="text"]::placeholder,
@@ -468,7 +468,7 @@
     input[type="search"]::placeholder,
     input[type="url"]::placeholder,
     textarea::placeholder {
-        color: var(--text-secondary);
+        color: var(--text-sec);
         opacity: 0.95;
     }
 
@@ -484,7 +484,7 @@
     input:-webkit-autofill:hover,
     input:-webkit-autofill:focus {
         -webkit-text-fill-color: var(--text) !important;
-        box-shadow: 0 0 0px 1000px color-mix(in srgb, var(--card) 88%, var(--background) 12%) inset !important;
+        box-shadow: 0 0 0px 1000px color-mix(in srgb, var(--card) 88%, var(--bg) 12%) inset !important;
         transition: background-color 9999s ease-in-out 0s;
     }
 
