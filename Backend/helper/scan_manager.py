@@ -10,20 +10,18 @@ from Backend.logger import LOGGER
 from Backend.helper.encrypt import encode_string, decode_string
 from Backend.helper.metadata import metadata
 from Backend.helper.pyro import clean_filename, get_readable_file_size, remove_urls
+from Backend.helper.split_files import parse_split_info, strip_part_suffix
 
+SCAN_BATCH_SIZE = 200          
+SCAN_MAX_EMPTY_BATCHES = 10    
+SCAN_MAX_ID_CAP = 1_000_000    
+SCAN_BATCH_DELAY = 0.5         
+SCAN_PERSIST_EVERY = 1         
+SCAN_PROBE_TEXT = "🔄"         
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Tunables — kept conservative so we never trip Telegram's flood limits.
-# ─────────────────────────────────────────────────────────────────────────────
-SCAN_BATCH_SIZE = 200          # get_messages accepts up to 200 ids per call
-SCAN_MAX_EMPTY_BATCHES = 10    # stop after this many consecutive empty batches
-SCAN_MAX_ID_CAP = 1_000_000    # hard ceiling to avoid runaway loops
-SCAN_BATCH_DELAY = 0.5         # seconds to sleep between batches
-SCAN_PERSIST_EVERY = 1         # persist state every N batches
-
-DBCHECK_CONCURRENCY = 5        # concurrent get_messages during integrity check
-DBCHECK_BATCH_DELAY = 0.3      # seconds between concurrent groups
-DBCHECK_PAGE_SIZE = 100        # mongo pagination size
+DBCHECK_CONCURRENCY = 5        
+DBCHECK_BATCH_DELAY = 0.3      
+DBCHECK_PAGE_SIZE = 100        
 
 _STATE_COLLECTION = "scan_state"
 _SCAN_DOC_ID = "scan"
@@ -44,9 +42,6 @@ def _fmt_elapsed(seconds: float) -> str:
     return f"{s}s"
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  ScanManager — resumable channel indexer
-# ═════════════════════════════════════════════════════════════════════════════
 class ScanManager:
     def __init__(self) -> None:
         self._db = None
@@ -59,14 +54,15 @@ class ScanManager:
     @staticmethod
     def _blank_state() -> Dict[str, Any]:
         return {
-            "status": "idle",            # idle|running|paused|completed|cancelled|error
-            "mode": "scan",              # scan|rescan
-            "selected_channels": [],     # channels chosen for the active run
-            "pending": [],               # channels still to finish this run
+            "status": "idle",            
+            "mode": "scan",              
+            "selected_channels": [],     
+            "pending": [],               
             "current_channel": None,
             "current_channel_name": "",
-            "current_id": 0,             # last message id reached in current channel
-            "cursors": {},               # {channel_id: next_message_id} — persistent
+            "current_id": 0,             
+            "current_target_id": 0,      
+            "cursors": {},               
             "counters": {
                 "total_found": 0,
                 "processed": 0,
@@ -98,8 +94,6 @@ class ScanManager:
         self._db = db
 
     async def load(self, db) -> None:
-        """Load persisted state on boot. A scan that was 'running' when the
-        process died is flipped to 'paused' so the user can resume it."""
         self._db = db
         try:
             doc = await db.dbs["tracking"][_STATE_COLLECTION].find_one({"_id": _SCAN_DOC_ID})
@@ -111,7 +105,6 @@ class ScanManager:
             doc.pop("_id", None)
             merged = self._blank_state()
             merged.update(doc)
-            # Normalise cursor keys to str (mongo keys are strings anyway)
             merged["cursors"] = {str(k): int(v) for k, v in (merged.get("cursors") or {}).items()}
             if merged["status"] == "running":
                 merged["status"] = "paused"
@@ -135,13 +128,17 @@ class ScanManager:
         except Exception as e:
             LOGGER.error(f"[ScanManager] persist failed: {e}")
 
-    # ── Public status (serialisable for the API) ─────────────────────────────
     def get_status(self) -> Dict[str, Any]:
         s = self.state
         elapsed = 0.0
         if s["started_at"]:
             end = s["finished_at"] or _now()
             elapsed = max(0.0, end - s["started_at"])
+
+        target = int(s.get("current_target_id", 0) or 0)
+        cur = int(s.get("current_id", 0) or 0)
+        progress = max(0, min(100, round(cur / target * 100))) if target > 0 else 0
+
         return {
             "status": s["status"],
             "mode": s["mode"],
@@ -151,39 +148,39 @@ class ScanManager:
             "pending": list(s["pending"]),
             "current_channel": s["current_channel"],
             "current_channel_name": s["current_channel_name"],
-            "current_id": s["current_id"],
+            "current_id": cur,
+            "current_target_id": target,
+            "progress": progress,
+            "has_progress": target > 0,
             "counters": dict(s["counters"]),
             "elapsed": _fmt_elapsed(elapsed),
             "elapsed_seconds": int(elapsed),
             "error": s["error"],
         }
 
-    # ── Duplicate detection ──────────────────────────────────────────────────
     async def _stream_id_exists(self, channel: int, msg_id: int) -> bool:
         db = self._db
         try:
             stream_hash = await encode_string({"chat_id": channel, "msg_id": msg_id})
         except Exception:
-            return False
+            stream_hash = None
+        part_match = {"$elemMatch": {"chat_id": channel, "msg_id": msg_id}}
         for i in range(1, db.current_db_index + 1):
             storage = db.dbs.get(f"storage_{i}")
             if storage is None:
                 continue
-            if await storage["movie"].find_one({"telegram.id": stream_hash}):
+            if stream_hash:
+                if await storage["movie"].find_one({"telegram.id": stream_hash}):
+                    return True
+                if await storage["tv"].find_one({"seasons.episodes.telegram.id": stream_hash}):
+                    return True
+            if await storage["movie"].find_one({"telegram.parts": part_match}):
                 return True
-            if await storage["tv"].find_one({"seasons.episodes.telegram.id": stream_hash}):
+            if await storage["tv"].find_one({"seasons.episodes.telegram.parts": part_match}):
                 return True
         return False
 
-    # ── Control: start / resume / cancel ─────────────────────────────────────
     async def start(self, client, channels: List[str], mode: str = "scan") -> Dict[str, Any]:
-        """Start (or resume) a scan.
-
-        mode == "rescan"  → purge selected channels, reset their cursors, fresh scan.
-        mode == "scan"    → resume any pending work, scanning each channel from its
-                            saved cursor (so previously-indexed messages are skipped
-                            and we continue exactly where we left off).
-        """
         async with self._lock:
             if self.state["status"] == "running":
                 return {"ok": False, "message": "A scan is already running."}
@@ -191,14 +188,12 @@ class ScanManager:
             channels = [str(c).strip() for c in (channels or []) if str(c).strip()]
 
             if mode == "scan" and not channels and self.state["pending"]:
-                # Plain resume of an interrupted run
                 channels = list(self.state["pending"])
 
             if not channels:
                 return {"ok": False, "message": "No channels selected."}
 
             if mode == "rescan":
-                # Purge + reset cursors for the selected channels
                 for ch in channels:
                     try:
                         ch_int = int(str(ch).replace("-100", ""))
@@ -213,10 +208,8 @@ class ScanManager:
                 self.state["pending"] = list(channels)
                 self.state["counters"] = self._blank_counters()
             else:
-                # Resume / fresh incremental scan
                 resuming = self.state["status"] in ("paused", "cancelled") and self.state["pending"]
                 if resuming:
-                    # Merge any newly-selected channels into the pending queue
                     merged_pending = list(self.state["pending"])
                     for ch in channels:
                         if ch not in merged_pending:
@@ -248,7 +241,6 @@ class ScanManager:
         self._cancel = True
         return {"ok": True, "message": "Stop requested — the scan will pause after the current batch."}
 
-    # ── Worker ────────────────────────────────────────────────────────────────
     async def _run(self, client) -> None:
         try:
             while self.state["pending"] and not self._cancel:
@@ -265,7 +257,6 @@ class ScanManager:
                 if self._cancel:
                     break
                 if completed:
-                    # channel done for this run — drop it from pending
                     if self.state["pending"] and self.state["pending"][0] == ch:
                         self.state["pending"].pop(0)
                     await self._persist()
@@ -288,7 +279,6 @@ class ScanManager:
             LOGGER.error(f"[ScanManager] {self.state['error']}")
             await self._persist()
         except asyncio.CancelledError:
-            # Process is shutting down — leave status running so load() flips to paused
             await self._persist()
             raise
         except Exception as e:
@@ -299,9 +289,6 @@ class ScanManager:
             await self._persist()
 
     async def _scan_channel(self, client, chat_id: int, ch_key: str) -> bool:
-        """Scan one channel from its saved cursor. Returns True if it ran to the
-        natural end (so it can be removed from the pending queue), False if it
-        was interrupted (cancel / shutdown)."""
         db = self._db
         s = self.state
 
@@ -315,17 +302,35 @@ class ScanManager:
             LOGGER.warning(f"[ScanManager] Could not resolve channel name for {chat_id}: {e}")
 
         s["current_channel"] = ch_key
+
+        last_id = await self._probe_last_message_id(client, chat_id)
+        use_probe = last_id is not None and last_id >= 1
+        s["current_target_id"] = last_id if use_probe else 0
+
         current = int(s["cursors"].get(str(ch_key), 1) or 1)
-        LOGGER.info(f"[ScanManager] Scanning {s['current_channel_name']} ({chat_id}) from id {current}")
+        LOGGER.info(
+            f"[ScanManager] Scanning {s['current_channel_name']} ({chat_id}) from id {current}"
+            + (f" up to {last_id} (probe)" if use_probe else " (heuristic mode — probe unavailable)")
+        )
 
         empty_streak = 0
         batch_count = 0
 
-        while empty_streak < SCAN_MAX_EMPTY_BATCHES and current < SCAN_MAX_ID_CAP:
-            if self._cancel:
-                return False
+        while not self._cancel and current < SCAN_MAX_ID_CAP:
+            # ── Stop condition ───────────────────────────────────────────────
+            if use_probe:
+                if current > last_id:
+                    break
+            elif empty_streak >= SCAN_MAX_EMPTY_BATCHES:
+                break
 
-            batch_ids = list(range(current, min(current + SCAN_BATCH_SIZE, SCAN_MAX_ID_CAP)))
+            upper = min(current + SCAN_BATCH_SIZE, SCAN_MAX_ID_CAP)
+            if use_probe:
+                upper = min(upper, last_id + 1)
+            batch_ids = list(range(current, upper))
+            if not batch_ids:
+                break
+
             try:
                 messages = await client.get_messages(chat_id, batch_ids)
             except FloodWait as e:
@@ -336,7 +341,7 @@ class ScanManager:
                 except Exception as ex:
                     LOGGER.error(f"[ScanManager] Retry failed at {current}: {ex}")
                     s["counters"]["errors"] += 1
-                    current += SCAN_BATCH_SIZE
+                    current = upper
                     empty_streak += 1
                     s["cursors"][str(ch_key)] = current
                     s["current_id"] = current
@@ -344,7 +349,7 @@ class ScanManager:
             except Exception as e:
                 LOGGER.error(f"[ScanManager] Batch fetch error at {current}: {e}")
                 s["counters"]["errors"] += 1
-                current += SCAN_BATCH_SIZE
+                current = upper
                 empty_streak += 1
                 s["cursors"][str(ch_key)] = current
                 s["current_id"] = current
@@ -369,7 +374,7 @@ class ScanManager:
                 s["counters"]["processed"] += 1
 
             empty_streak = 0 if batch_had_content else empty_streak + 1
-            current += SCAN_BATCH_SIZE
+            current = upper
             s["cursors"][str(ch_key)] = current
             s["current_id"] = current
 
@@ -383,23 +388,55 @@ class ScanManager:
         LOGGER.info(f"[ScanManager] Finished {s['current_channel_name']} at id {current}")
         return True
 
+    async def _probe_last_message_id(self, client, chat_id: int):
+        probe = None
+        try:
+            probe = await client.send_message(chat_id, SCAN_PROBE_TEXT)
+        except FloodWait as e:
+            LOGGER.info(f"[ScanManager] FloodWait {e.value}s during probe — sleeping…")
+            await asyncio.sleep(e.value)
+            try:
+                probe = await client.send_message(chat_id, SCAN_PROBE_TEXT)
+            except Exception as ex:
+                LOGGER.warning(f"[ScanManager] Probe send failed for {chat_id}: {ex}")
+                return None
+        except Exception as e:
+            LOGGER.warning(f"[ScanManager] Could not send probe to {chat_id}: {e}")
+            return None
+
+        last_id = getattr(probe, "id", None)
+        try:
+            await client.delete_messages(chat_id, probe.id)
+        except Exception as e:
+            LOGGER.warning(
+                f"[ScanManager] Could not delete probe message "
+                f"{getattr(probe, 'id', None)} in {chat_id}: {e}"
+            )
+        return last_id
+
     async def _process_message(self, message, chat_id: int) -> None:
         s = self.state
         db = self._db
 
         is_video = bool(message.video)
-        is_video_doc = False
+        is_supported = is_video
         if message.document and not is_video:
             mime = getattr(message.document, "mime_type", "") or ""
-            is_video_doc = mime.startswith("video/")
+            if mime.startswith("video/"):
+                is_supported = True
+            else:
+                candidate = message.caption or message.document.file_name or ""
+                if parse_split_info(candidate):
+                    is_supported = True
 
-        if not (is_video or is_video_doc):
+        if not is_supported:
             s["counters"]["skipped_nonvid"] += 1
             return
 
         file = message.video or message.document
         title = message.caption or file.file_name
         msg_id = message.id
+        raw_size = file.file_size
         size = get_readable_file_size(file.file_size)
         channel_int = int(str(chat_id).replace("-100", ""))
 
@@ -421,6 +458,8 @@ class ScanManager:
             return
 
         title_clean = remove_urls(title)
+        if metadata_info.get('group_key'):
+            title_clean = strip_part_suffix(title_clean)
         if not title_clean.endswith(('.mkv', '.mp4')):
             title_clean += '.mkv'
 
@@ -431,6 +470,7 @@ class ScanManager:
                 msg_id=msg_id,
                 size=size,
                 name=title_clean,
+                raw_size=raw_size,
             )
             if updated_id:
                 s["counters"]["indexed"] += 1
@@ -495,9 +535,6 @@ class ScanManager:
         return purged
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  DbCheckManager — integrity checker + dead-link purge
-# ═════════════════════════════════════════════════════════════════════════════
 class DbCheckManager:
     def __init__(self) -> None:
         self._db = None
@@ -509,14 +546,14 @@ class DbCheckManager:
     @staticmethod
     def _blank_state() -> Dict[str, Any]:
         return {
-            "status": "idle",   # idle|running|completed|cancelled|error
+            "status": "idle",   
             "checked": 0,
             "alive": 0,
             "dead": 0,
             "errors": 0,
             "purged": 0,
             "speed": 0,
-            "dead_entries": [],   # [{"id": hash, "title": str}]
+            "dead_entries": [],   
             "started_at": 0.0,
             "finished_at": 0.0,
             "error": None,
@@ -569,7 +606,6 @@ class DbCheckManager:
     async def _check_message(self, client, stream_hash: str):
         try:
             decoded = await decode_string(stream_hash)
-            # split files store a parts list — every part must be alive
             if isinstance(decoded, dict) and "parts" in decoded:
                 parts = decoded.get("parts") or []
                 if not parts:
