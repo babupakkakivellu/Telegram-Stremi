@@ -16,11 +16,19 @@ from rapidfuzz import fuzz
 from guessit import guessit as _guessit
 from difflib import SequenceMatcher
 
-try:
-    def _fuzzy_ratio(a: str, b: str) -> float:
-        return fuzz.token_set_ratio(a, b) / 100.0
-except Exception:
-    def _fuzzy_ratio(a: str, b: str) -> float:
+def _fuzzy_ratio(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    try:
+        set_ratio = fuzz.token_set_ratio(a, b) / 100.0
+        sort_ratio = fuzz.token_sort_ratio(a, b) / 100.0
+        a_tokens, b_tokens = a.split(), b.split()
+        if a_tokens and b_tokens:
+            coverage = min(len(a_tokens), len(b_tokens)) / max(len(a_tokens), len(b_tokens))
+        else:
+            coverage = 0.0
+        return max(sort_ratio, set_ratio * coverage)
+    except Exception:
         return SequenceMatcher(None, a, b).ratio()
 
 
@@ -126,12 +134,13 @@ def _score_candidate(query_title: str, query_year: Optional[int], result_title: 
     score = _title_similarity(query_title, result_title)
     if query_year and result_year:
         diff = abs(int(query_year) - result_year)
-        if diff == 0:
-            score = min(1.0, score + 0.20)
-        elif diff == 1:
-            score = min(1.0, score + 0.07)
-        elif diff > 2:
+        if diff > 2:
             score = max(0.0, score - 0.10 * (diff - 2))
+        elif score >= 0.5:
+            if diff == 0:
+                score = min(1.0, score + 0.20)
+            elif diff == 1:
+                score = min(1.0, score + 0.07)
     return score
 
 def _build_query_variants(title: str, year: Optional[int] = None) -> List[str]:
