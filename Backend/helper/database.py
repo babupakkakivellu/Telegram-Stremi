@@ -966,6 +966,12 @@ class Database:
 
         # ---------------- UPDATE MOVIE ----------------
         movie_id = existing_movie["_id"]
+
+        if imdb_id and not existing_movie.get("imdb_id"):
+            existing_movie["imdb_id"] = imdb_id
+        if tmdb_id and not existing_movie.get("tmdb_id"):
+            existing_movie["tmdb_id"] = tmdb_id
+
         existing_qualities = existing_movie.get("telegram", [])
 
         existing_qualities = await self._apply_quality_update(existing_qualities, quality_to_update)
@@ -1043,6 +1049,11 @@ class Database:
 
         # ---------------- UPDATE TV ----------------
         tv_id = existing_tv["_id"]
+
+        if imdb_id and not existing_tv.get("imdb_id"):
+            existing_tv["imdb_id"] = imdb_id
+        if tmdb_id and not existing_tv.get("tmdb_id"):
+            existing_tv["tmdb_id"] = tmdb_id
 
         for season in tv_show_dict["seasons"]:
             existing_season = next(
@@ -1861,6 +1872,49 @@ class Database:
 
 
 
+    @staticmethod
+    def _merge_telegram_lists(primary: List[dict], secondary: List[dict]) -> List[dict]:
+        merged = list(primary or [])
+        existing_ids = {q.get("id") for q in merged if q.get("id")}
+        existing_groups = {q.get("group_key") for q in merged if q.get("group_key")}
+        for q in (secondary or []):
+            group_key = q.get("group_key")
+            if group_key and group_key in existing_groups:
+                continue
+            if q.get("id") and q.get("id") in existing_ids:
+                continue
+            merged.append(q)
+            if q.get("id"):
+                existing_ids.add(q.get("id"))
+            if group_key:
+                existing_groups.add(group_key)
+        return merged
+
+    def _merge_season_lists(self, primary: List[dict], secondary: List[dict]) -> List[dict]:
+        merged = list(primary or [])
+        season_map = {s.get("season_number"): s for s in merged}
+        for season in (secondary or []):
+            season_number = season.get("season_number")
+            target_season = season_map.get(season_number)
+            if not target_season:
+                merged.append(season)
+                season_map[season_number] = season
+                continue
+
+            target_season.setdefault("episodes", [])
+            episode_map = {e.get("episode_number"): e for e in target_season["episodes"]}
+            for episode in season.get("episodes", []):
+                episode_number = episode.get("episode_number")
+                target_episode = episode_map.get(episode_number)
+                if not target_episode:
+                    target_season["episodes"].append(episode)
+                    episode_map[episode_number] = episode
+                    continue
+                target_episode["telegram"] = self._merge_telegram_lists(
+                    target_episode.get("telegram", []), episode.get("telegram", [])
+                )
+        return merged
+
     async def replace_media_metadata(
         self,
         media_type: str,
@@ -1876,7 +1930,7 @@ class Database:
         if not current_doc:
             return None
 
-        current_doc.pop("_id", None)
+        source_id = current_doc["_id"]
 
         def _pick(key: str):
             new_value = metadata.get(key)
@@ -1884,11 +1938,13 @@ class Database:
                 return current_doc.get(key)
             return new_value
 
+        new_tmdb_id = int(metadata.get("tmdb_id") or tmdb_id)
+        new_imdb_id = _pick("imdb_id")
+
         if collection_name == "movie":
-            preserved_telegram = current_doc.get("telegram", [])
             current_doc.update({
-                "tmdb_id": int(metadata.get("tmdb_id") or tmdb_id),
-                "imdb_id": _pick("imdb_id"),
+                "tmdb_id": new_tmdb_id,
+                "imdb_id": new_imdb_id,
                 "title": _pick("title"),
                 "release_year": _pick("release_year"),
                 "rating": _pick("rating"),
@@ -1900,14 +1956,13 @@ class Database:
                 "cast": _pick("cast"),
                 "runtime": _pick("runtime"),
                 "media_type": "movie",
-                "telegram": preserved_telegram,
+                "telegram": current_doc.get("telegram", []),
                 "updated_on": datetime.utcnow(),
             })
         else:
-            preserved_seasons = current_doc.get("seasons", [])
             current_doc.update({
-                "tmdb_id": int(metadata.get("tmdb_id") or tmdb_id) if metadata.get("tmdb_id") else int(tmdb_id),
-                "imdb_id": _pick("imdb_id"),
+                "tmdb_id": new_tmdb_id,
+                "imdb_id": new_imdb_id,
                 "title": _pick("title"),
                 "release_year": _pick("release_year"),
                 "rating": _pick("rating"),
@@ -1919,13 +1974,44 @@ class Database:
                 "cast": _pick("cast"),
                 "runtime": _pick("runtime"),
                 "media_type": "tv",
-                "seasons": preserved_seasons,
+                "seasons": current_doc.get("seasons", []),
                 "updated_on": datetime.utcnow(),
             })
 
-        new_tmdb_id = int(current_doc["tmdb_id"])
-        await collection.delete_one({"tmdb_id": int(tmdb_id)})
-        await collection.insert_one(current_doc)
+        identity_filters = []
+        if new_imdb_id:
+            identity_filters.append({"imdb_id": new_imdb_id})
+        identity_filters.append({"tmdb_id": new_tmdb_id})
 
-        updated_doc = await collection.find_one({"tmdb_id": new_tmdb_id})
+        existing_other = await collection.find_one({
+            "$and": [{"$or": identity_filters}, {"_id": {"$ne": source_id}}]
+        })
+
+        if existing_other:
+            if collection_name == "movie":
+                existing_other["telegram"] = self._merge_telegram_lists(
+                    existing_other.get("telegram", []), current_doc.get("telegram", [])
+                )
+            else:
+                existing_other["seasons"] = self._merge_season_lists(
+                    existing_other.get("seasons", []), current_doc.get("seasons", [])
+                )
+
+            for field in (
+                "tmdb_id", "imdb_id", "title", "release_year", "rating",
+                "description", "poster", "backdrop", "logo", "genres",
+                "cast", "runtime", "media_type",
+            ):
+                if field in current_doc:
+                    existing_other[field] = current_doc[field]
+            existing_other["updated_on"] = datetime.utcnow()
+
+            await collection.delete_one({"_id": source_id})
+            await collection.replace_one({"_id": existing_other["_id"]}, existing_other)
+
+            updated_doc = await collection.find_one({"_id": existing_other["_id"]})
+            return convert_objectid_to_str(updated_doc) if updated_doc else None
+        await collection.replace_one({"_id": source_id}, current_doc)
+
+        updated_doc = await collection.find_one({"_id": source_id})
         return convert_objectid_to_str(updated_doc) if updated_doc else None
