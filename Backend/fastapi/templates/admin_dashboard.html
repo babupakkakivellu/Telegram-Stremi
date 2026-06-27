@@ -5,16 +5,14 @@
 {% block content %}
 <style>
   .glass-card {
-    background: color-mix(in srgb, var(--card) 52%, transparent);
+    background: color-mix(in srgb, var(--card) 94%, var(--bg));
     border: 1px solid color-mix(in srgb, var(--border) 95%, transparent);
-    backdrop-filter: blur(22px);
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
   }
 
   .glass-card-soft {
-    background: color-mix(in srgb, var(--card) 40%, transparent);
+    background: color-mix(in srgb, var(--card) 86%, var(--bg));
     border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-    backdrop-filter: blur(18px);
   }
 
   .section-title {
@@ -314,7 +312,7 @@
     </div>
 
     <div class="glass-card rounded-3xl overflow-hidden mb-6 sm:mb-8">
-        <div class="px-5 sm:px-6 lg:px-8 py-4 sm:py-5 border-b border-white/10 bg-white/5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div class="px-5 sm:px-6 lg:px-8 py-4 sm:py-5 border-b border-hairline bg-surface flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
                 <h2 class="section-title text-xl sm:text-2xl">Bot Health & Load</h2>
                 <p class="muted text-sm mt-1">Track stream load, average speed, and failure trends per bot.</p>
@@ -328,7 +326,7 @@
     </div>
 
     <div class="glass-card rounded-3xl overflow-hidden mb-6 sm:mb-8">
-        <div class="px-5 sm:px-6 lg:px-8 py-4 sm:py-5 border-b border-white/10 bg-white/5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div class="px-5 sm:px-6 lg:px-8 py-4 sm:py-5 border-b border-hairline bg-surface flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
                 <h2 class="section-title text-xl sm:text-2xl">Recent Stream Analytics</h2>
                 <p class="muted text-sm mt-1">Data transferred, speed, duration, and status for recent streams.</p>
@@ -372,7 +370,7 @@
     </div>
 
     <div class="glass-card rounded-3xl overflow-hidden">
-        <div class="px-5 sm:px-6 lg:px-8 py-4 sm:py-5 border-b border-white/10 bg-white/5 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div class="px-5 sm:px-6 lg:px-8 py-4 sm:py-5 border-b border-hairline bg-surface flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
                 <h2 class="section-title text-xl sm:text-2xl">Flagged Dead Links</h2>
                 <p class="muted text-sm mt-1">Purge broken qualities so users no longer see dead content.</p>
