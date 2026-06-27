@@ -819,18 +819,39 @@ class Database:
             )
             return await self.update_tv_show(tv_show)
 
+    async def _delete_split_part(self, part: dict) -> None:
+        try:
+            chat_id = int(f"-100{part['chat_id']}")
+            msg_id = int(part["msg_id"])
+            create_task(delete_message(chat_id, msg_id))
+        except Exception as e:
+            LOGGER.error(f"Failed to delete split part message: {e}")
+
     async def _merge_split_part(self, qualities: List[dict], quality_to_update: dict) -> List[dict]:
         group_key = quality_to_update.get("group_key")
         incoming_parts = quality_to_update.get("parts") or []
         if not incoming_parts:
             return qualities + [quality_to_update]
         new_part = incoming_parts[0]
+        replace_mode = SettingsManager.current().replace_mode
 
         merged = False
         result = []
         for q in qualities:
             if group_key is not None and q.get("group_key") == group_key:
                 existing_parts = q.get("parts") or []
+
+                if replace_mode:
+                    for old_part in existing_parts:
+                        if old_part.get("part_number") != new_part.get("part_number"):
+                            continue
+                        if (
+                            old_part.get("chat_id") == new_part.get("chat_id")
+                            and old_part.get("msg_id") == new_part.get("msg_id")
+                        ):
+                            continue
+                        await self._delete_split_part(old_part)
+
                 existing_parts = [
                     p for p in existing_parts if p.get("part_number") != new_part.get("part_number")
                 ]
@@ -851,12 +872,7 @@ class Database:
         parts = quality.get("parts")
         if parts:
             for part in parts:
-                try:
-                    chat_id = int(f"-100{part['chat_id']}")
-                    msg_id = int(part["msg_id"])
-                    create_task(delete_message(chat_id, msg_id))
-                except Exception as e:
-                    LOGGER.error(f"Failed to delete split part message: {e}")
+                await self._delete_split_part(part)
             return
 
         old_id = quality.get("id")
