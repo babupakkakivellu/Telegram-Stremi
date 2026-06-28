@@ -1,9 +1,8 @@
 import re
 from typing import Optional, Tuple
 
-_VIDEO_EXTENSIONS = r'mkv|mp4|avi|ts|m4v|mov|wmv|webm|flv'
+_VIDEO_EXTENSIONS = r'mkv|mp4|avi|ts|m4v|mov|wmv|webm|flv|m2ts|mpg|mpeg'
 _TRAILING_NUMERIC_PATTERN = re.compile(rf'(?i)\.({_VIDEO_EXTENSIONS})\.(\d{{2,3}})$')
-_NUMERIC_PATTERN = re.compile(r'(?i)[\.\-_](\d{2,3})(?=[\.\-_][a-z0-9]{2,4}$)')
 _NORMALIZE_RE = re.compile(r'[\.\-_ ]+')
 
 
@@ -15,12 +14,6 @@ def _find_split_match(name: str) -> Optional[Tuple[int, int, int, Optional[str]]
     m = _TRAILING_NUMERIC_PATTERN.search(name)
     if m:
         return m.start(), m.end(), int(m.group(2)), m.group(1)
-
-    m = _NUMERIC_PATTERN.search(name)
-    if m:
-        part_num = int(m.group(1))
-        if 1 <= part_num <= 99:
-            return m.start(), m.end(), part_num, None
 
     return None
 
@@ -40,7 +33,7 @@ def parse_split_info(filename: str) -> Optional[Tuple[str, int]]:
 
 
 _COMBINED_EPISODES_RE = re.compile(
-    r"E(?:P|PISODE)?[\s._-]*0*(\d{1,4})[\s._-]*(?:-|–|~|to)+[\s._-]*(?:E(?:P|PISODE)?[\s._-]*)?0*(\d{1,4})(?=\D|$)",
+    r"E(?:P|PISODE)?[\s._-]*0*(\d{1,4})[\s._-]*(?:-|–|~|\+|&|,|to)+[\s._-]*(?:E(?:P|PISODE)?[\s._-]*)?0*(\d{1,4})(?=\D|$)",
     re.IGNORECASE,
 )
 _COMBINED_SEASON_RE = re.compile(r"S(?:EASON)?[\s._-]*0*(\d{1,3})", re.IGNORECASE)
@@ -52,8 +45,6 @@ def _combined_season(name: str) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
-# Detect a combined file: an episode range ("S01 E04-06") or a whole-season
-# "Combined" file. Returns {season, start, end} (start/end None for whole season).
 def parse_combined_episodes(filename: str) -> Optional[dict]:
     if not filename:
         return None
