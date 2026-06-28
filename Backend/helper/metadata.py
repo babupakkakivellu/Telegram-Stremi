@@ -11,6 +11,7 @@ from Backend.helper.imdb import get_detail, get_season, search_title, search_tit
 from Backend.helper.settings_manager import SettingsManager
 from Backend.helper.encrypt import encode_string
 from Backend.helper.split_files import parse_split_info, parse_combined_episodes
+from Backend.helper.anime import fetch_anime_metadata, fetch_anime_movie_metadata
 from themoviedb import aioTMDb
 from rapidfuzz import fuzz
 from guessit import guessit as _guessit
@@ -47,20 +48,24 @@ API_SEMAPHORE = asyncio.Semaphore(12)
 
 _MULTIPART_RE = re.compile(r"(?:part|cd|disc|disk)[s._-]*\d+(?=\.\w+$)", re.IGNORECASE)
 
-# Combined episode files (e.g. "S01 [E04-06]" or "S01 Combined") are grouped under a special season.
+# Combined files are grouped in the Specials folder (season 0) as a single
+# "Season N Combined" entry per real season.
 COMBINED_SEASON = 0
+COMBINED_EPISODE_BASE = 1000
 
 
-# Re-file a combined entry under the special season with a descriptive title.
+# Re-file a combined entry into its season's single Combined slot inside Specials.
+# A range/Full label is appended to the quality so distinct combined files coexist
+# while an identical re-upload still replaces correctly under replace mode.
 def _apply_combined_override(payload: dict, combined: dict) -> None:
     season, start, end = combined["season"], combined["start"], combined["end"]
     payload["season_number"] = COMBINED_SEASON
-    if start is None:
-        payload["episode_number"] = season * 1000
-        payload["episode_title"] = f"S{season:02d} Complete (Combined)"
-    else:
-        payload["episode_number"] = season * 1000 + start
-        payload["episode_title"] = f"S{season:02d} E{start:02d}-E{end:02d} (Combined)"
+    payload["episode_number"] = COMBINED_EPISODE_BASE + season
+    payload["episode_title"] = f"Season {season} Combined"
+    label = "Full" if start is None else f"E{start:02d}-E{end:02d}"
+    payload["quality"] = f"{payload.get('quality') or 'HD'} {label}"
+    if not payload.get("episode_backdrop"):
+        payload["episode_backdrop"] = payload.get("backdrop") or payload.get("poster") or ""
 
 _tmdb_client: aioTMDb | None = None
 _tmdb_client_key: str | None = None
@@ -425,6 +430,20 @@ def _extract_cast(details) -> list:
     return [getattr(c, "name", None) or getattr(c, "original_name", None) for c in cast]
 
 
+# Collect ISO 3166-1 country codes from a TMDb details object (origin_country
+# and production_countries), used by the auto-catalog classifier.
+def _tmdb_country_codes(details) -> list:
+    codes: list = []
+    for code in (getattr(details, "origin_country", None) or []):
+        if code and code not in codes:
+            codes.append(code)
+    for country in (getattr(details, "production_countries", None) or []):
+        code = getattr(country, "iso_3166_1", None) or (country.get("iso_3166_1") if isinstance(country, dict) else None)
+        if code and code not in codes:
+            codes.append(code)
+    return codes
+
+
 def _format_runtime(minutes) -> str:
     return f"{minutes} min" if minutes else ""
 
@@ -446,6 +465,8 @@ def _build_tmdb_movie_payload(movie, quality, encoded_string) -> dict:
         "runtime": str(_format_runtime(getattr(movie, "runtime", None))),
         "media_type": "movie",
         "genres": [g.name for g in (movie.genres or [])],
+        "original_language": getattr(movie, "original_language", None),
+        "origin_country": _tmdb_country_codes(movie),
         "quality": quality,
         "encoded_string": encoded_string,
     }
@@ -471,6 +492,8 @@ def _build_tmdb_tv_payload(tv, ep, season, episode, quality, encoded_string) -> 
         "media_type": "tv",
         "cast": _extract_cast(tv),
         "runtime": str(runtime),
+        "original_language": getattr(tv, "original_language", None),
+        "origin_country": _tmdb_country_codes(tv),
         "season_number": season,
         "episode_number": episode,
         "episode_title": getattr(ep, "name", fallback_ep_title) if ep else fallback_ep_title,
@@ -534,6 +557,51 @@ def _build_imdb_tv_payload(imdb, ep, imdb_id, title, season, episode, quality, e
 
 # ----------------- Main entry-point -----------------
 
+# True when a file's channel is configured as an anime channel.
+def _is_anime_channel(channel) -> bool:
+    anime_channels = SettingsManager.current().anime_channels
+    if not anime_channels:
+        return False
+    target = str(channel).replace("-100", "")
+    return any(str(c).strip().replace("-100", "") == target for c in anime_channels)
+
+
+# Resolve anime TV metadata, filling the imdb_id from tmdb when ani.zip lacks it.
+async def _fetch_anime_tv(title, season, episode, encoded_string, year, quality) -> dict | None:
+    try:
+        result = await fetch_anime_metadata(title, season, episode, encoded_string, year, quality)
+    except Exception as e:
+        LOGGER.warning(f"[ANIME] metadata error for '{title}': {e}")
+        return None
+    if result is None:
+        return None
+    if not result.get("imdb_id") and result.get("tmdb_id"):
+        result["imdb_id"] = await _tmdb_external_imdb_id("tv", result["tmdb_id"])
+    if not result.get("imdb_id"):
+        LOGGER.info(f"[ANIME] No imdb id for '{title}' -> falling back to TMDb/Cinemeta")
+        return None
+    LOGGER.info(f"[ANIME] Matched '{result.get('title')}' [{result.get('imdb_id')}] S{season:02d}E{episode:02d}")
+    return result
+
+
+# Resolve anime movie metadata, filling the imdb_id from tmdb when ani.zip lacks it.
+async def _fetch_anime_movie(title, encoded_string, year, quality) -> dict | None:
+    try:
+        result = await fetch_anime_movie_metadata(title, encoded_string, year, quality)
+    except Exception as e:
+        LOGGER.warning(f"[ANIME] movie metadata error for '{title}': {e}")
+        return None
+    if result is None:
+        return None
+    if not result.get("imdb_id") and result.get("tmdb_id"):
+        result["imdb_id"] = await _tmdb_external_imdb_id("movie", result["tmdb_id"])
+    if not result.get("imdb_id"):
+        LOGGER.info(f"[ANIME] No imdb id for movie '{title}' -> falling back to TMDb/Cinemeta")
+        return None
+    LOGGER.info(f"[ANIME] Matched movie '{result.get('title')}' [{result.get('imdb_id')}]")
+    return result
+
+
 # Parse a filename/caption and resolve full movie or TV metadata for the indexer.
 async def metadata(filename: str, channel: int, msg_id, override_id: str = None) -> dict | None:
     try:
@@ -567,9 +635,10 @@ async def metadata(filename: str, channel: int, msg_id, override_id: str = None)
     elif isinstance(season, list) or isinstance(episode, list):
         LOGGER.warning(f"Invalid season/episode format for {filename}: {parsed}")
         return None
-    if season and not episode:
-        LOGGER.warning(f"Missing episode in {filename}: {parsed}")
-        return None
+    elif season and not episode:
+        # Season pack with no episode number (e.g. "Season 01") -> whole-season combined.
+        combined = {"season": season, "start": None, "end": None}
+        episode = 1
     if not quality:
         LOGGER.warning(f"Skipping {filename}: No resolution (parsed={parsed})")
         return None
@@ -586,16 +655,28 @@ async def metadata(filename: str, channel: int, msg_id, override_id: str = None)
 
     group_key = f"{channel}:{quality}:{split_info[0]}" if split_info else None
 
+    anime_channel = _is_anime_channel(channel)
+
     try:
         if season and episode:
             LOGGER.info(f"Fetching TV metadata: {title} S{season:02d}E{episode:02d} (year={year})")
-            result = await fetch_tv_metadata(title, season, episode, encoded_string, year, quality, default_id)
+            result = None
+            if not default_id and anime_channel:
+                result = await _fetch_anime_tv(title, season, episode, encoded_string, year, quality)
+            if result is None:
+                result = await fetch_tv_metadata(title, season, episode, encoded_string, year, quality, default_id)
             if result is not None and combined:
                 _apply_combined_override(result, combined)
         else:
             LOGGER.info(f"Fetching Movie metadata: {title} (year={year})")
-            result = await fetch_movie_metadata(title, encoded_string, year, quality, default_id)
+            result = None
+            if not default_id and anime_channel:
+                result = await _fetch_anime_movie(title, encoded_string, year, quality)
+            if result is None:
+                result = await fetch_movie_metadata(title, encoded_string, year, quality, default_id)
         if result is not None:
+            if anime_channel:
+                result["is_anime"] = True
             result["group_key"] = group_key
             result["part_number"] = part_number
         return result

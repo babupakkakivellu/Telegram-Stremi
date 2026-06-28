@@ -13,8 +13,6 @@ from Backend.logger import LOGGER
 AUTO_CATALOG_REGION = "IN"
 AUTO_SYNC_CONCURRENCY = 5
 
-# Hourly quick sync. It only starts after the admin has saved at least one
-# auto-catalog option from /catalogs, so first boot stays clean.
 AUTO_CATALOG_INTERVAL_SYNC = True
 AUTO_CATALOG_SYNC_INTERVAL_MINUTES = 60
 
@@ -96,8 +94,18 @@ _PROVIDER_ALIASES = {
 _auto_sync_lock = asyncio.Lock()
 _auto_sync_task: Optional[asyncio.Task] = None
 
+INSTANT_SYNC_CONCURRENCY = 3
+_instant_sync_semaphore = asyncio.Semaphore(INSTANT_SYNC_CONCURRENCY)
+
 
 def _tmdb_api_key() -> str:
+    try:
+        from Backend.helper.settings_manager import SettingsManager
+        key = SettingsManager.current().tmdb_api
+        if key:
+            return key
+    except Exception:
+        pass
     return getattr(Telegram, "TMDB_API", "") or ""
 
 
@@ -174,8 +182,6 @@ async def get_auto_catalog_settings(db) -> dict:
     state = await db.dbs["tracking"]["state"].find_one({"_id": "auto_catalog_settings"}) or {}
     configured = isinstance(state.get("enabled_keys"), list)
 
-    # Important: first boot should not auto-create catalogs.
-    # Until the admin saves settings from /catalogs, enabled_keys stays empty.
     enabled_keys = state.get("enabled_keys") if configured else []
 
     enabled_set = {key for key in enabled_keys if key in CATALOG_BY_KEY}
@@ -205,7 +211,23 @@ async def update_auto_catalog_settings(db, enabled_keys: List[str]) -> dict:
         {"$set": {"enabled_keys": clean_keys, "updated_at": now}},
         upsert=True,
     )
+    await _invalidate_synced_flags(db)
     return await get_auto_catalog_settings(db)
+
+
+async def _invalidate_synced_flags(db) -> None:
+    for db_index in range(1, db.current_db_index + 1):
+        db_key = f"storage_{db_index}"
+        if db_key not in db.dbs:
+            continue
+        for collection_name in ["movie", "tv"]:
+            try:
+                await db.dbs[db_key][collection_name].update_many(
+                    {"auto_catalog.synced": True},
+                    {"$set": {"auto_catalog.synced": False}},
+                )
+            except Exception as e:
+                LOGGER.warning(f"Auto catalog: failed to reset synced flags in {db_key}.{collection_name}: {e}")
 
 
 async def _enabled_catalog_names(db) -> Set[str]:
@@ -221,12 +243,15 @@ def classify_media_from_tmdb(doc: dict, details: dict, watch_data: dict, enabled
     media_type = _media_type(doc)
     original_language = details.get("original_language") or doc.get("original_language") or ""
 
-    origin_country = details.get("origin_country") or []
+    if doc.get("is_anime"):
+        tags.add("Anime")
+
+    origin_country = details.get("origin_country") or doc.get("origin_country") or []
     production_countries = [
         c.get("iso_3166_1")
         for c in details.get("production_countries", []) or []
         if c.get("iso_3166_1")
-    ]
+    ] or (doc.get("production_countries") or [])
 
     for tag in _LANGUAGE_CATALOGS.get(original_language, []):
         tags.add(tag)
@@ -260,11 +285,21 @@ def classify_media_from_tmdb(doc: dict, details: dict, watch_data: dict, enabled
         except Exception:
             pass
 
-    for provider_name in _extract_provider_names(watch_data):
-        bucket = _provider_bucket(provider_name)
-        if bucket:
-            providers.add(bucket)
-            tags.add(bucket)
+    provider_names = _extract_provider_names(watch_data)
+    if provider_names:
+        for provider_name in provider_names:
+            bucket = _provider_bucket(provider_name)
+            if bucket:
+                providers.add(bucket)
+    else:
+        # No live watch-provider data (fetch failed / quota / no key): reuse the
+        # OTT buckets already stored on the doc so a re-classify keeps OTT tags.
+        for stored in (doc.get("watch_providers") or []):
+            if stored:
+                providers.add(stored)
+
+    for bucket in providers:
+        tags.add(bucket)
 
     tags = {tag for tag in tags if tag in enabled_names}
 
@@ -327,7 +362,7 @@ async def _iter_all_media(db, *, full_rebuild: bool = False):
         for collection_name in ["movie", "tv"]:
             cursor = db.dbs[db_key][collection_name].find({"tmdb_id": {"$exists": True, "$ne": None}})
             async for doc in cursor:
-                doc["db_index"] = int(doc.get("db_index", db_index))
+                doc["db_index"] = db_index
                 doc["media_type"] = "tv" if collection_name == "tv" else "movie"
                 if not full_rebuild and _is_already_synced(doc):
                     yield collection_name, db_index, doc, True
@@ -338,14 +373,8 @@ async def _iter_all_media(db, *, full_rebuild: bool = False):
 async def _classify_one(db, client: httpx.AsyncClient, semaphore: asyncio.Semaphore, doc: dict, enabled_names: Set[str]) -> tuple[dict, dict]:
     async with semaphore:
         try:
-            details, watch_data = await _fetch_tmdb_data(client, doc)
-            classification = classify_media_from_tmdb(doc, details, watch_data, enabled_names) if details else {
-                "original_language": doc.get("original_language", ""),
-                "origin_country": doc.get("origin_country", []),
-                "production_countries": doc.get("production_countries", []),
-                "watch_providers": doc.get("watch_providers", []),
-                "auto_tags": [tag for tag in (doc.get("auto_tags", []) or []) if tag in enabled_names],
-            }
+            details, watch_data = await asyncio.wait_for(_fetch_tmdb_data(client, doc), timeout=30)
+            classification = classify_media_from_tmdb(doc, details or {}, watch_data or {}, enabled_names)
 
             now = datetime.utcnow()
             update_data = {
@@ -361,11 +390,80 @@ async def _classify_one(db, client: httpx.AsyncClient, semaphore: asyncio.Semaph
                     "source_updated_on": doc.get("updated_on"),
                 },
             }
-            await db.update_document(_media_type(doc), int(doc.get("tmdb_id")), int(doc.get("db_index", 1)), update_data)
+            persisted = await asyncio.wait_for(
+                db.update_document(_media_type(doc), int(doc.get("tmdb_id")), int(doc.get("db_index", 1)), update_data),
+                timeout=30,
+            )
+            if persisted is False:
+                LOGGER.warning(
+                    "Auto catalog sync flag not persisted for "
+                    f"{doc.get('title')} (tmdb_id={doc.get('tmdb_id')}, "
+                    f"db_index={doc.get('db_index')}); document not found in that storage DB."
+                )
             return doc, classification
         except Exception as e:
             LOGGER.warning(f"Auto catalog classification failed for {doc.get('title')} ({doc.get('tmdb_id')}): {e}")
             return doc, {"auto_tags": [tag for tag in (doc.get("auto_tags", []) or []) if tag in enabled_names]}
+
+
+async def sync_single_media(db, *, tmdb_id, media_type: str) -> dict:
+    if tmdb_id in (None, "", 0):
+        return {"ok": False, "reason": "no_tmdb_id"}
+
+    try:
+        tmdb_id = int(tmdb_id)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "bad_tmdb_id"}
+
+    if not await has_auto_catalog_settings(db):
+        return {"ok": False, "reason": "not_configured"}
+
+    enabled_names = await _enabled_catalog_names(db)
+    if not enabled_names:
+        return {"ok": False, "reason": "no_enabled_catalogs"}
+
+    if _auto_sync_lock.locked():
+        return {"ok": False, "reason": "sync_running"}
+
+    located = await db.find_media_doc(media_type, tmdb_id)
+    if not located:
+        return {"ok": False, "reason": "not_found"}
+
+    doc, db_index = located
+    doc["db_index"] = db_index
+    doc["media_type"] = "tv" if media_type in ["tv", "series"] else "movie"
+
+    timeout = httpx.Timeout(18.0, connect=10.0)
+    semaphore = asyncio.Semaphore(1)
+    async with _instant_sync_semaphore:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            media_doc, classification = await _classify_one(db, client, semaphore, doc, enabled_names)
+
+    tags = [tag for tag in (classification.get("auto_tags") or []) if tag in enabled_names]
+    if tags:
+        item = _doc_item(media_doc)
+        await _flush_quick_items(db, {tag: [item] for tag in tags})
+
+    LOGGER.info(
+        f"Auto catalog instant index: '{media_doc.get('title')}' "
+        f"(tmdb_id={tmdb_id}) -> {tags or 'no matching catalogs'}"
+    )
+    return {"ok": True, "tags": tags}
+
+
+def start_single_media_catalog_sync(db, *, tmdb_id, media_type: str) -> None:
+    """Fire-and-forget launcher for instant per-item categorization."""
+    async def runner():
+        try:
+            await sync_single_media(db, tmdb_id=tmdb_id, media_type=media_type)
+        except Exception:
+            LOGGER.exception("Instant auto catalog index failed")
+
+    try:
+        asyncio.create_task(runner())
+    except RuntimeError:
+        # No running loop (shouldn't happen inside the bot); ignore.
+        LOGGER.warning("Instant auto catalog index skipped: no running event loop.")
 
 
 async def _flush_quick_items(db, catalog_items: Dict[str, List[dict]]) -> None:
@@ -515,9 +613,15 @@ async def run_auto_catalog_sync(db, *, force: bool = False, full_rebuild: bool =
             LOGGER.info(f"Auto catalog sync skipped: {summary}")
             return summary
 
+        if not _tmdb_api_key():
+            LOGGER.warning(
+                "Auto catalog: no TMDB API key configured — only 'Top Rated' and "
+                "'Recently Added' will populate; language & OTT catalogs need a TMDB key."
+            )
+
         try:
             timeout = httpx.Timeout(18.0, connect=10.0)
-            limits = httpx.Limits(max_connections=AUTO_SYNC_CONCURRENCY + 2, max_keepalive_connections=AUTO_SYNC_CONCURRENCY)
+            limits = httpx.Limits(max_connections=AUTO_SYNC_CONCURRENCY * 2 + 4, max_keepalive_connections=AUTO_SYNC_CONCURRENCY)
             semaphore = asyncio.Semaphore(AUTO_SYNC_CONCURRENCY)
 
             async def consume_result(media_doc: dict, classification: dict) -> None:
@@ -535,11 +639,7 @@ async def run_auto_catalog_sync(db, *, force: bool = False, full_rebuild: bool =
                 async for _, _, doc, already_synced in _iter_all_media(db, full_rebuild=full_rebuild):
                     scanned += 1
 
-                    if already_synced and not force and not full_rebuild:
-                        skipped += 1
-                        continue
-
-                    if already_synced and force and not full_rebuild:
+                    if already_synced and not full_rebuild:
                         skipped += 1
                         continue
 

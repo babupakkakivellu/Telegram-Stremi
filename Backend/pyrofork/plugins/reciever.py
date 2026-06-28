@@ -6,6 +6,7 @@ from Backend import db
 from Backend.helper.settings_manager import SettingsManager
 from Backend.helper.pyro import clean_filename, get_readable_file_size, remove_urls
 from Backend.helper.metadata import metadata
+from Backend.helper.auto_catalog import start_single_media_catalog_sync
 from pyrogram import filters, Client
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
@@ -40,6 +41,12 @@ async def process_file():
                 LOGGER.info(f"{metadata_info['media_type']} updated with ID: {updated_id}")
             else:
                 LOGGER.info("Update failed due to validation errors.")
+        if updated_id:
+            start_single_media_catalog_sync(
+                db,
+                tmdb_id=metadata_info.get("tmdb_id"),
+                media_type=metadata_info.get("media_type"),
+            )
         file_queue.task_done()
 
 for _ in range(1):
