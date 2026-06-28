@@ -1,206 +1,145 @@
-# Theme configurations based on your color palettes
+DEFAULT_THEME = "graphite_amber"
+
 THEMES = {
-    "purple_gradient": {
-        "name": "Purple Gradient",
-        "colors": {
-            "primary": "#A855F7",
-            "secondary": "#7C3AED", 
-            "accent": "#C084FC",
-            "background": "#F8FAFC",
-            "card": "#FFFFFF",
-            "text": "#1E293B",
-            "text_secondary": "#64748B"
-        },
-        "css_classes": "theme-purple-gradient"
-    },
-    "blue_navy": {
-        "name": "Navy Blue",
-        "colors": {
-            "primary": "#1E40AF",
-            "secondary": "#1E3A8A",
-            "accent": "#3B82F6",
-            "background": "#F1F5F9",
-            "card": "#FFFFFF",
-            "text": "#1E293B",
-            "text_secondary": "#475569"
-        },
-        "css_classes": "theme-blue-navy"
-    },
-    "sunset_warm": {
-        "name": "Sunset Warm",
+    "graphite_amber": {
+        "name": "Graphite Amber",
+        "is_dark": True,
         "colors": {
             "primary": "#F59E0B",
-            "secondary": "#DC2626",
-            "accent": "#EC4899",
-            "background": "#FFFBEB",
-            "card": "#FFFFFF",
-            "text": "#1F2937",
-            "text_secondary": "#6B7280"
+            "secondary": "#D97706",
+            "accent": "#FBBF24",
+            "background": "#0C0C0D",
+            "card": "#18181B",
+            "border": "#2B2B30",
+            "text": "#FAFAF9",
+            "text_secondary": "#A9A8A4"
         },
-        "css_classes": "theme-sunset-warm"
+        "css_classes": "theme-graphite-amber"
     },
-    "ocean_mint": {
-        "name": "Ocean Mint",
+    "amoled_midnight": {
+        "name": "AMOLED Midnight",
+        "is_dark": True,
+        "colors": {
+            "primary": "#38BDF8",
+            "secondary": "#0EA5E9",
+            "accent": "#818CF8",
+            "background": "#000000",
+            "card": "#0B0B0F",
+            "border": "#1E2430",
+            "text": "#F4F7FB",
+            "text_secondary": "#9AA6B8"
+        },
+        "css_classes": "theme-amoled-midnight"
+    },
+    "obsidian_emerald": {
+        "name": "Obsidian Emerald",
+        "is_dark": True,
         "colors": {
             "primary": "#10B981",
             "secondary": "#059669",
-            "accent": "#06B6D4",
-            "background": "#F0FDF4",
+            "accent": "#34D399",
+            "background": "#08100C",
+            "card": "#111C16",
+            "border": "#203029",
+            "text": "#ECFDF5",
+            "text_secondary": "#92B6A4"
+        },
+        "css_classes": "theme-obsidian-emerald"
+    },
+    "royal_violet": {
+        "name": "Royal Violet",
+        "is_dark": True,
+        "colors": {
+            "primary": "#8B5CF6",
+            "secondary": "#7C3AED",
+            "accent": "#A78BFA",
+            "background": "#0B0712",
+            "card": "#171022",
+            "border": "#2C2142",
+            "text": "#F5F3FF",
+            "text_secondary": "#B4A8CF"
+        },
+        "css_classes": "theme-royal-violet"
+    },
+    "slate_ocean": {
+        "name": "Slate Ocean",
+        "is_dark": True,
+        "colors": {
+            "primary": "#0EA5E9",
+            "secondary": "#0284C7",
+            "accent": "#38BDF8",
+            "background": "#0A0F1A",
+            "card": "#121C2B",
+            "border": "#23324B",
+            "text": "#EFF6FF",
+            "text_secondary": "#93A7C4"
+        },
+        "css_classes": "theme-slate-ocean"
+    },
+    "rose_quartz": {
+        "name": "Rose Quartz",
+        "is_dark": False,
+        "colors": {
+            "primary": "#E11D48",
+            "secondary": "#BE123C",
+            "accent": "#F43F5E",
+            "background": "#FFF1F2",
             "card": "#FFFFFF",
-            "text": "#1F2937",
-            "text_secondary": "#4B5563"
+            "border": "#FBD5DB",
+            "text": "#4C0519",
+            "text_secondary": "#8A2B3E"
         },
-        "css_classes": "theme-ocean-mint"
+        "css_classes": "theme-rose-quartz"
     },
-    "dark_professional": {
-        "name": "Dark Professional",
+    "daylight_sky": {
+        "name": "Daylight Sky",
+        "is_dark": False,
         "colors": {
-            "primary": "#06B6D4",
-            "secondary": "#0891B2",
-            "accent": "#22D3EE",
-            "background": "#0F172A",
-            "card": "#1E293B",
-            "text": "#F8FAFC",
-            "text_secondary": "#CBD5E1"
-        },
-        "css_classes": "theme-dark-professional"
-    },
-    "crimson_elegance": {
-        "name": "Crimson Elegance",
-        "colors": {
-            "primary": "#DC2626",
-            "secondary": "#991B1B",
-            "accent": "#F87171",
-            "background": "#FEF2F2",
+            "primary": "#2563EB",
+            "secondary": "#1D4ED8",
+            "accent": "#3B82F6",
+            "background": "#F8FAFC",
             "card": "#FFFFFF",
-            "text": "#1F2937",
-            "text_secondary": "#6B7280"
+            "border": "#E2E8F0",
+            "text": "#0F172A",
+            "text_secondary": "#475569"
         },
-        "css_classes": "theme-crimson-elegance"
+        "css_classes": "theme-daylight-sky"
     },
-    "coral_bliss": {
-        "name": "Coral Bliss",
+    "sage_linen": {
+        "name": "Sage Linen",
+        "is_dark": False,
         "colors": {
-            "primary": "#FF6B6B",
-            "secondary": "#EE5A6F",
-            "accent": "#FFB347",
-            "background": "#FFF5F5",
+            "primary": "#0F766E",
+            "secondary": "#0D9488",
+            "accent": "#14B8A6",
+            "background": "#F5F8F6",
             "card": "#FFFFFF",
-            "text": "#2D3748",
-            "text_secondary": "#718096"
+            "border": "#DCE7E3",
+            "text": "#11271F",
+            "text_secondary": "#4B5D58"
         },
-        "css_classes": "theme-coral-bliss"
+        "css_classes": "theme-sage-linen"
     },
-    "cyber_neon": {
-        "name": "Cyber Neon",
+    "golden_hour": {
+        "name": "Golden Hour",
+        "is_dark": False,
         "colors": {
-            "primary": "#00FFF0",
-            "secondary": "#FF00FF",
-            "accent": "#00FF88",
-            "background": "#0A0E27",
-            "card": "#1A1F3A",
-            "text": "#FFFFFF",
-            "text_secondary": "#A0AEC0"
-        },
-        "css_classes": "theme-cyber-neon"
-    },
-    "forest_earth": {
-        "name": "Forest Earth",
-        "colors": {
-            "primary": "#2D5016",
-            "secondary": "#50623A",
-            "accent": "#86A789",
-            "background": "#F5F5DC",
+            "primary": "#B45309",
+            "secondary": "#92400E",
+            "accent": "#D97706",
+            "background": "#FFFBF2",
             "card": "#FFFFFF",
-            "text": "#1C1C1C",
-            "text_secondary": "#5C5C5C"
+            "border": "#F0E4CC",
+            "text": "#3F2D12",
+            "text_secondary": "#7A5A2E"
         },
-        "css_classes": "theme-forest-earth"
-    },
-    "lavender_dream": {
-        "name": "Lavender Dream",
-        "colors": {
-            "primary": "#B08BBB",
-            "secondary": "#9370DB",
-            "accent": "#DDA0DD",
-            "background": "#FAF5FF",
-            "card": "#FFFFFF",
-            "text": "#2D3748",
-            "text_secondary": "#718096"
-        },
-        "css_classes": "theme-lavender-dream"
-    },
-    "golden_luxury": {
-        "name": "Golden Luxury",
-        "colors": {
-            "primary": "#D4AF37",
-            "secondary": "#B8860B",
-            "accent": "#FFD700",
-            "background": "#FFFEF7",
-            "card": "#FFFFFF",
-            "text": "#1A202C",
-            "text_secondary": "#4A5568"
-        },
-        "css_classes": "theme-golden-luxury"
-    },
-    "arctic_frost": {
-        "name": "Arctic Frost",
-        "colors": {
-            "primary": "#B0E0E6",
-            "secondary": "#4682B4",
-            "accent": "#87CEEB",
-            "background": "#F0F8FF",
-            "card": "#FFFFFF",
-            "text": "#1E3A5F",
-            "text_secondary": "#5B7C99"
-        },
-        "css_classes": "theme-arctic-frost"
-    },
-    "cherry_cola": {
-        "name": "Cherry Cola",
-        "colors": {
-            "primary": "#BF1922",
-            "secondary": "#8B0000",
-            "accent": "#DC143C",
-            "background": "#FFF0F0",
-            "card": "#FFFFFF",
-            "text": "#1F2937",
-            "text_secondary": "#6B7280"
-        },
-        "css_classes": "theme-cherry-cola"
-    },
-    "emerald_tech": {
-        "name": "Emerald Tech",
-        "colors": {
-            "primary": "#047857",
-            "secondary": "#065F46",
-            "accent": "#10B981",
-            "background": "#ECFDF5",
-            "card": "#FFFFFF",
-            "text": "#1F2937",
-            "text_secondary": "#4B5563"
-        },
-        "css_classes": "theme-emerald-tech"
-    },
-    "midnight_carbon": {
-        "name": "Midnight Carbon",
-        "colors": {
-            "primary": "#3B82F6",
-            "secondary": "#1E40AF",
-            "accent": "#60A5FA",
-            "background": "#111827",
-            "card": "#1F2937",
-            "text": "#F9FAFB",
-            "text_secondary": "#D1D5DB"
-        },
-        "css_classes": "theme-midnight-carbon"
+        "css_classes": "theme-golden-hour"
     }
 }
 
-
-def get_theme(theme_name: str = "purple_gradient"):
-    return THEMES.get(theme_name, THEMES["purple_gradient"])
-
+def get_theme(theme_name: str = DEFAULT_THEME):
+    return THEMES.get(theme_name, THEMES[DEFAULT_THEME])
 
 def get_all_themes():
     return THEMES

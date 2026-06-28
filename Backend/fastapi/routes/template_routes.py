@@ -2,21 +2,36 @@ from fastapi import Request, Form, HTTPException, Depends
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from Backend.fastapi.security.credentials import verify_credentials, require_auth, is_authenticated, get_current_user
-from Backend.fastapi.themes import get_theme, get_all_themes
+from Backend.fastapi.themes import get_theme, get_all_themes, DEFAULT_THEME
 from Backend import db
+from Backend.config import Telegram
 from Backend.pyrofork.bot import work_loads, multi_clients, StreamBot
 from Backend.helper.pyro import get_readable_time
+from Backend.helper.settings_manager import SettingsManager
 from Backend import StartTime, __version__
-from time import time
-
+import time
+from Backend.helper.custom_dl import ACTIVE_STREAMS, RECENT_STREAMS
 
 templates = Jinja2Templates(directory="Backend/fastapi/templates")
+
+async def admin_dashboard_page(request: Request, _: bool = Depends(require_auth)):
+    theme_name = request.session.get("theme", DEFAULT_THEME)
+    theme = get_theme(theme_name)
+    current_user = get_current_user(request)
+    
+    return templates.TemplateResponse("admin_dashboard.html", {
+        "request": request,
+        "theme": theme,
+        "themes": get_all_themes(),
+        "current_theme": theme_name,
+        "current_user": current_user
+    })
 
 async def login_page(request: Request):
     if is_authenticated(request):
         return RedirectResponse(url="/", status_code=302)
     
-    theme_name = request.session.get("theme", "purple_gradient")
+    theme_name = request.session.get("theme", DEFAULT_THEME)
     theme = get_theme(theme_name)
     
     return templates.TemplateResponse("login.html", {
@@ -32,7 +47,7 @@ async def login_post(request: Request, username: str = Form(...), password: str 
         request.session["username"] = username
         return RedirectResponse(url="/", status_code=302)
     else:
-        theme_name = request.session.get("theme", "purple_gradient")
+        theme_name = request.session.get("theme", DEFAULT_THEME)
         theme = get_theme(theme_name)
         return templates.TemplateResponse("login.html", {
             "request": request,
@@ -52,7 +67,7 @@ async def set_theme(request: Request, theme: str = Form(...)):
     return RedirectResponse(url=request.headers.get("referer", "/"), status_code=302)
 
 async def dashboard_page(request: Request, _: bool = Depends(require_auth)):
-    theme_name = request.session.get("theme", "purple_gradient")
+    theme_name = request.session.get("theme", DEFAULT_THEME)
     theme = get_theme(theme_name)
     current_user = get_current_user(request)
     
@@ -60,54 +75,93 @@ async def dashboard_page(request: Request, _: bool = Depends(require_auth)):
         db_stats = await db.get_database_stats()
         total_movies = sum(stat.get("movie_count", 0) for stat in db_stats)
         total_tv_shows = sum(stat.get("tv_count", 0) for stat in db_stats)
-        
+
+        now = time.time()
+        PRUNE_SECONDS = 3
+        for sid, info in list(ACTIVE_STREAMS.items()):
+            status = info.get("status")
+            # Check end_ts first to see when it organically finished
+            last_ts = info.get("end_ts") or info.get("last_ts") or info.get("start_ts", now)
+
+            if status in ("cancelled", "error", "finished") and (now - last_ts > PRUNE_SECONDS):
+
+                info["duration"] = round(now - info.get("start_ts", now), 1)
+                info["stream_id"] = sid
+                try:
+                    RECENT_STREAMS.appendleft(info)
+                    ACTIVE_STREAMS.pop(sid)
+                except KeyError:
+                    pass
+
+        active_streams_data = []
+        for stream_id, info in ACTIVE_STREAMS.items():
+            active_streams_data.append({
+                "stream_id": stream_id,
+                "msg_id": info.get("msg_id"),
+                "chat_id": info.get("chat_id"),
+                "status": info.get("status", "active"),
+                "total_bytes": info.get("total_bytes", 0),
+                "avg_mbps": round(info.get("avg_mbps", 0.0), 2),
+                "instant_mbps": round(info.get("instant_mbps", 0.0), 2),
+                "peak_mbps": round(info.get("peak_mbps", 0.0), 2),
+                "client_index": info.get("client_index", 0),
+                "dc_id": info.get("dc_id", 0),
+                "duration": round(now - info.get("start_ts", now), 1),
+                "meta": info.get("meta", {})
+            })
+
         system_stats = {
             "server_status": "running",
-            "uptime": get_readable_time(time() - StartTime),
+            "uptime": get_readable_time(now - StartTime),
             "telegram_bot": f"@{StreamBot.username}" if StreamBot and StreamBot.username else "@StreamBot",
             "connected_bots": len(multi_clients),
             "loads": {
-                f"bot{c + 1}": l
-                for c, (_, l) in enumerate(
-                    sorted(work_loads.items(), key=lambda x: x[1], reverse=True)
-                )
+                f"bot{c+1}": l
+                for c, (_, l) in enumerate(sorted(work_loads.items(), key=lambda x: x[1], reverse=True))
             } if work_loads else {},
             "version": __version__,
             "movies": total_movies,
             "tv_shows": total_tv_shows,
             "databases": db_stats,
             "total_databases": len(db_stats),
-            "current_db_index": db.current_db_index
+            "current_db_index": db.current_db_index,
+            "active_streams": active_streams_data,
+            "total_active_streams": len(active_streams_data)
         }
+
     except Exception as e:
         print(f"Dashboard error: {e}")
         system_stats = {
-            "server_status": "error", 
+            "server_status": "error",
             "error": str(e),
             "uptime": "N/A",
             "telegram_bot": "@StreamBot",
             "connected_bots": 0,
             "loads": {},
-            "version": "1.0.0",
+            "version": __version__,
             "movies": 0,
             "tv_shows": 0,
             "databases": [],
             "total_databases": 0,
-            "current_db_index": 1
+            "current_db_index": 1,
+            "active_streams": [],
+            "total_active_streams": 0
         }
-    
+
+    api_tokens = await db.get_all_api_tokens()
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
         "theme": theme,
         "themes": get_all_themes(),
         "current_theme": theme_name,
         "current_user": current_user,
-        "system_stats": system_stats
+        "system_stats": system_stats,
+        "api_tokens": api_tokens
     })
-    
+
 
 async def media_management_page(request: Request, media_type: str = "movie", _: bool = Depends(require_auth)):
-    theme_name = request.session.get("theme", "purple_gradient")
+    theme_name = request.session.get("theme", DEFAULT_THEME)
     theme = get_theme(theme_name)
     current_user = get_current_user(request)
     
@@ -121,7 +175,7 @@ async def media_management_page(request: Request, media_type: str = "movie", _: 
     })
 
 async def edit_media_page(request: Request, tmdb_id: int, db_index: int, media_type: str, _: bool = Depends(require_auth)):
-    theme_name = request.session.get("theme", "purple_gradient")
+    theme_name = request.session.get("theme", DEFAULT_THEME)
     theme = get_theme(theme_name)
     current_user = get_current_user(request)
     
@@ -131,7 +185,10 @@ async def edit_media_page(request: Request, tmdb_id: int, db_index: int, media_t
             raise HTTPException(status_code=404, detail="Media not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+    api_tokens = await db.get_all_api_tokens()
+    api_token = api_tokens[0].get("token") if api_tokens else None
+
     return templates.TemplateResponse("media_edit.html", {
         "request": request,
         "theme": theme,
@@ -141,11 +198,12 @@ async def edit_media_page(request: Request, tmdb_id: int, db_index: int, media_t
         "tmdb_id": tmdb_id,
         "db_index": db_index,
         "media_type": media_type,
-        "media_details": media_details
+        "media_details": media_details,
+        "api_token": api_token
     })
 
 async def public_status_page(request: Request):
-    theme_name = request.session.get("theme", "purple_gradient")
+    theme_name = request.session.get("theme", DEFAULT_THEME)
     theme = get_theme(theme_name)
     
     try:
@@ -177,7 +235,7 @@ async def public_status_page(request: Request):
     })
 
 async def stremio_guide_page(request: Request):
-    theme_name = request.session.get("theme", "purple_gradient")
+    theme_name = request.session.get("theme", DEFAULT_THEME)
     theme = get_theme(theme_name)
     
     return templates.TemplateResponse("stremio_guide.html", {
@@ -187,3 +245,92 @@ async def stremio_guide_page(request: Request):
         "current_theme": theme_name,
         "is_authenticated": is_authenticated(request)
     })
+
+async def admin_subscriptions_page(request: Request, _: bool = Depends(require_auth)):
+    theme_name = request.session.get("theme", DEFAULT_THEME)
+    theme = get_theme(theme_name)
+    current_user = get_current_user(request)
+    
+    return templates.TemplateResponse("subscriptions_manage.html", {
+        "request": request,
+        "theme": theme,
+        "themes": get_all_themes(),
+        "current_theme": theme_name,
+        "current_user": current_user
+    })
+
+
+async def admin_access_page(request: Request, _: bool = Depends(require_auth)):
+    theme_name = request.session.get("theme", DEFAULT_THEME)
+    theme = get_theme(theme_name)
+    current_user = get_current_user(request)
+
+    return templates.TemplateResponse("access_manage.html", {
+        "request": request,
+        "theme": theme,
+        "themes": get_all_themes(),
+        "current_theme": theme_name,
+        "current_user": current_user,
+    })
+
+
+
+async def custom_catalogs_page(request: Request, _: bool = Depends(require_auth)):
+    theme_name = request.session.get("theme", DEFAULT_THEME)
+    theme = get_theme(theme_name)
+    current_user = get_current_user(request)
+
+    return templates.TemplateResponse("custom_catalogs.html", {
+        "request": request,
+        "theme": theme,
+        "themes": get_all_themes(),
+        "current_theme": theme_name,
+        "current_user": current_user,
+    })
+
+
+
+async def tools_page(request: Request, _: bool = Depends(require_auth)):
+    theme_name = request.session.get("theme", DEFAULT_THEME)
+    theme = get_theme(theme_name)
+    current_user = get_current_user(request)
+
+    return templates.TemplateResponse(
+        "tools.html",
+        {
+            "request": request,
+            "theme": theme,
+            "themes": get_all_themes(),
+            "current_theme": theme_name,
+            "current_user": current_user,
+        },
+    )
+
+
+async def settings_page(request: Request, _: bool = Depends(require_auth)):
+    theme_name = request.session.get("theme", DEFAULT_THEME)
+    theme = get_theme(theme_name)
+    current_user = get_current_user(request)
+
+    settings = SettingsManager.current().to_dict()
+    settings["admin_password"] = ""
+
+    try:
+        settings["database_list"] = db.get_database_list()
+    except Exception:
+        settings["database_list"] = []
+
+    userbot_configured = bool(Telegram.USER_SESSION_STRING and Telegram.USER_SESSION_STRING.strip())
+
+    return templates.TemplateResponse(
+        "settings.html",
+        {
+            "request": request,
+            "theme": theme,
+            "themes": get_all_themes(),
+            "current_theme": theme_name,
+            "current_user": current_user,
+            "settings": settings,
+            "userbot_configured": userbot_configured,
+        },
+)

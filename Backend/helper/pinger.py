@@ -1,13 +1,14 @@
 import asyncio
 import traceback
 import aiohttp
-from Backend.config import Telegram  
+from Backend.helper.settings_manager import SettingsManager
 from Backend.logger import LOGGER
+
 
 async def ping():
 
     sleep_time = 1200
-    manifest_url = f"{Telegram.BASE_URL}/stremio/manifest.json"
+    manifest_url = f"{SettingsManager.current().base_url}/api/system/stats"
 
     while True:
         await asyncio.sleep(sleep_time)
