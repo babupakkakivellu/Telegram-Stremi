@@ -834,7 +834,7 @@ After this first run, **every push to your fork auto-deploys**. Watch the build 
 
 ### 🎬 Step 9: Setup the Additional value
 
-1. Go to Web settings page `https://<your-hf-username>-<your-space-name>.hf.space/settings`.
+1. Go to Web settings page `https://<your-hf-username>-<your-space-name>.hf.space/admin/settings`.
 2. Fill up the TMDB API, AUTH CHANNEL.
 3. If you need to fill up other things check [Web Settings](#-step-4-configure-everything-else-web-settings-page)
 4. Save the settings and enjoy.
