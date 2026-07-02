@@ -3,7 +3,7 @@ from typing import Optional
 from Backend.logger import LOGGER
 from Backend import __version__, now, timezone
 from Backend.helper.settings_manager import SettingsManager
-from Backend.helper.exceptions import FIleNotFound
+from Backend.helper.exceptions import FileNotFound
 from aiofiles import open as aiopen
 from aiofiles.os import path as aiopath, remove as aioremove
 from pyrogram import Client
@@ -15,16 +15,16 @@ from pyrogram import enums
 
 _EMOJI_PATTERN = re.compile(
     "["
-    "\U0001F600-\U0001F64F"   # emoticons
-    "\U0001F300-\U0001F5FF"   # symbols & pictographs
-    "\U0001F680-\U0001F6FF"   # transport & map
-    "\U0001F700-\U0001FAFF"   # extended symbols (geometric, supplemental, etc.)
-    "\U00002702-\U000027B0"   # dingbats
-    "\U000024C2-\U0001F251"   # enclosed chars
-    "\u2600-\u26FF"           # misc symbols (☆, ★, ☀, ©, ®, ™, …)
-    "\u2700-\u27BF"           # dingbats block
-    "\uFE00-\uFE0F"           # variation selectors
-    "\U0001F1E0-\U0001F1FF"   # regional indicator / flag sequences
+    "\U0001F600-\U0001F64F"   #----- emoticons
+    "\U0001F300-\U0001F5FF"   #----- symbols & pictographs
+    "\U0001F680-\U0001F6FF"   #----- transport & map
+    "\U0001F700-\U0001FAFF"   #----- extended symbols (geometric, supplemental, etc.)
+    "\U00002702-\U000027B0"   #----- dingbats
+    "\U000024C2-\U0001F251"   #----- enclosed chars
+    "\u2600-\u26FF"           #----- misc symbols (☆, ★, ☀, ©, ®, ™, …)
+    "\u2700-\u27BF"           #----- dingbats block
+    "\uFE00-\uFE0F"           #----- variation selectors
+    "\U0001F1E0-\U0001F1FF"   #----- regional indicator / flag sequences
     "]+",
     re.UNICODE,
 )
@@ -34,7 +34,7 @@ _DECORATION_PATTERN = re.compile(
     re.UNICODE,
 )
 
-# Telegram / social-media channel tag patterns
+#----- Telegram / social-media channel tag patterns
 _CHANNEL_TAG_PATTERN = re.compile(
     r"_@[A-Za-z]+_|@[A-Za-z]+_|[\[\]\s@]*@[^.\s\[\]]+[\]\[\s@]*"
 )
@@ -63,7 +63,7 @@ async def get_file_ids(client: Client, chat_id: int, message_id: int) -> Optiona
     try:
         message = await client.get_messages(chat_id, message_id)
         if message.empty:
-            raise FIleNotFound("Message not found or empty")
+            raise FileNotFound("Message not found or empty")
 
         if media := is_media(message):
             file_id_obj = FileId.decode(media.file_id)
@@ -76,7 +76,7 @@ async def get_file_ids(client: Client, chat_id: int, message_id: int) -> Optiona
 
             return file_id_obj
         else:
-            raise FIleNotFound("No supported media found in message")
+            raise FileNotFound("No supported media found in message")
     except Exception as e:
         LOGGER.error(f"Error getting file IDs: {e}")
         raise
@@ -99,23 +99,23 @@ def clean_filename(filename: str) -> str:
     if not filename:
         return "unknown_file"
 
-    # 1 – Remove emoji sequences
+    #----- 1 – Remove emoji sequences
     filename = _EMOJI_PATTERN.sub(" ", filename)
 
-    # 2 – Remove decorative unicode symbols
+    #----- 2 – Remove decorative unicode symbols
     filename = _DECORATION_PATTERN.sub(" ", filename)
 
-    # 3 – Replace any remaining non-ASCII characters with a space.
-    #     Keep standard filename-safe characters: alphanumerics, . - _ ( ) [ ] ' " , : ! ? & + @
+    #----- 3 – Replace any remaining non-ASCII characters with a space.
+    #----- Keep standard filename-safe characters: alphanumerics, . - _ ( ) [ ] ' " , : ! ? & + @
     filename = re.sub(r"[^\x20-\x7E]", " ", filename)
 
-    # 4 – Remove Telegram channel tags  (@ChannelName_ etc.)
+    #----- 4 – Remove Telegram channel tags  (@ChannelName_ etc.)
     filename = _CHANNEL_TAG_PATTERN.sub("", filename)
 
-    # 5 – Remove codec / source tags that clutter the title region
+    #----- 5 – Remove codec / source tags that clutter the title region
     filename = _CODEC_TAG_PATTERN.sub(" ", filename)
 
-    # 6 – Collapse multiple spaces; remove space before extension dot
+    #----- 6 – Collapse multiple spaces; remove space before extension dot
     filename = re.sub(r"\s+", " ", filename).strip().replace(" .", ".")
 
     return filename if filename else "unknown_file"
@@ -197,7 +197,7 @@ async def restart_notification():
         LOGGER.error(f"Error in restart_notification: {e}")
 
 
-# Bot commands
+#----- Bot commands
 commands = [
     BotCommand("start", "🚀 Start the bot"),
     BotCommand("set", "🎬 Manually add IMDb metadata"),
