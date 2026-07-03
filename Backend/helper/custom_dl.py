@@ -211,13 +211,13 @@ class ByteStreamer:
             return seq_idx, None
 
         async def producer():
+            scheduled_tasks = {}
             try:
                 if part_count <= 0:
                     await q.put((None, None))
                     return
 
                 next_to_schedule = 0
-                scheduled_tasks = {}
                 results_buffer = {}
                 next_to_put = 0
                 max_parallel = max(1, parallelism)
@@ -296,6 +296,17 @@ class ByteStreamer:
                     await q.put((None, None))
                 except Exception:
                     pass
+            finally:
+                stop_event.set()
+                if scheduled_tasks:
+                    for t in scheduled_tasks.values():
+                        if not t.done():
+                            t.cancel()
+                    try:
+                        await asyncio.gather(*scheduled_tasks.values(), return_exceptions=True)
+                    except Exception:
+                        pass
+                    scheduled_tasks.clear()
 
         async def consumer_generator():
             producer_task = asyncio.create_task(producer())
@@ -308,6 +319,7 @@ class ByteStreamer:
                     if _disconnect_check_counter % 8 == 0:
                         try:
                             if request and await request.is_disconnected():
+                                stop_event.set()
                                 ACTIVE_STREAMS[stream_id]["status"] = "cancelled"
                                 break
                         except Exception:
@@ -317,6 +329,7 @@ class ByteStreamer:
                         off_chunk = await asyncio.wait_for(q.get(), timeout=90.0)
                     except asyncio.TimeoutError:
                         LOGGER.error("Producer stall (90 s) for stream %s — aborting", stream_id)
+                        stop_event.set()
                         ACTIVE_STREAMS[stream_id]["status"] = "error"
                         break
 
@@ -374,16 +387,19 @@ class ByteStreamer:
                     current_part_idx += 1
 
             except asyncio.CancelledError:
+                stop_event.set()
                 if not producer_task.done():
                     producer_task.cancel()
                 ACTIVE_STREAMS[stream_id]["status"] = "cancelled"
                 raise
             except Exception as e:
                 LOGGER.exception("Consumer error for stream %s: %s", stream_id, e)
+                stop_event.set()
                 ACTIVE_STREAMS[stream_id]["status"] = "error"
                 if not producer_task.done():
                     producer_task.cancel()
             finally:
+                stop_event.set()
                 if not producer_task.done():
                     try:
                         producer_task.cancel()
