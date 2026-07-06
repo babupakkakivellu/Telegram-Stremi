@@ -40,6 +40,53 @@ def invalidate_membership_cache(user_id: int | None = None) -> None:
         _membership_cache.pop(key, None)
 
 
+#----- Effective (mode, allowed_tokens) for a title, honouring per-item overrides
+def _effective_visibility(catalog: dict, item: dict) -> tuple:
+    if item.get("visibility") in ("public", "tokens", "owner"):
+        return item["visibility"], (item.get("allowed_tokens") or [])
+    return (catalog.get("visibility") or "public"), (catalog.get("allowed_tokens") or [])
+
+
+#----- Whether a token may see content with the given visibility
+def _token_can_view(mode: str, allowed_tokens: list, token_data: dict) -> bool:
+    user_id = token_data.get("user_id")
+    try:
+        if user_id is not None and int(user_id) == int(Telegram.OWNER_ID):
+            return True
+    except (TypeError, ValueError):
+        pass
+    if mode == "owner":
+        return False
+    if mode == "tokens":
+        return token_data.get("token") in (allowed_tokens or [])
+    if SettingsManager.current().subscription:
+        return not token_data.get("subscription_expired")
+    return True
+
+
+#----- Mongo filter that hides owner-only / restricted titles from a token
+def _visibility_query(token_data: dict) -> dict:
+    user_id = token_data.get("user_id")
+    try:
+        if user_id is not None and int(user_id) == int(Telegram.OWNER_ID):
+            return {}
+    except (TypeError, ValueError):
+        pass
+    return {"$or": [
+        {"visibility": {"$exists": False}},
+        {"visibility": "public"},
+        {"visibility": "tokens", "allowed_tokens": token_data.get("token")},
+    ]}
+
+
+#----- Whether a title (by imdb id) may be seen by this token, honouring its own visibility
+async def _title_allowed(imdb_id: str, token_data: dict) -> bool:
+    doc = await db.get_media_details(imdb_id=imdb_id)
+    if not doc:
+        return True
+    return _token_can_view(doc.get("visibility") or "public", doc.get("allowed_tokens") or [], token_data)
+
+
 #----- Available catalog genres
 GENRES = [
     "Action", "Adventure", "Animation", "Biography", "Comedy",
@@ -198,11 +245,14 @@ async def get_manifest(token: str, token_data: dict = Depends(verify_token)):
         ]
 
         try:
-            custom_catalogs = await db.get_custom_catalogs(visible_only=True)
+            custom_catalogs = await db.get_custom_catalogs()
             for catalog in custom_catalogs:
-                items = catalog.get("items") or []
-                has_movie = any(i.get("media_type") == "movie" for i in items)
-                has_series = any(i.get("media_type") == "tv" for i in items)
+                visible_items = [
+                    i for i in (catalog.get("items") or [])
+                    if _token_can_view(*_effective_visibility(catalog, i), token_data)
+                ]
+                has_movie = any(i.get("media_type") == "movie" for i in visible_items)
+                has_series = any(i.get("media_type") == "tv" for i in visible_items)
                 if not has_movie and not has_series:
                     continue
                 catalog_id = str(catalog.get("_id"))
@@ -263,7 +313,7 @@ async def get_manifest(token: str, token_data: dict = Depends(verify_token)):
         "types": ["movie", "series"],
         "resources": resources,
         "catalogs": catalogs,
-        "idPrefixes": ["tt"],
+        "idPrefixes": ["tt", "tg"],
         "behaviorHints": {
             "configurable": True,
             "configurationRequired": False
@@ -312,19 +362,26 @@ async def get_catalog(token: str, media_type: str, id: str, extra: Optional[str]
         if id.startswith("custom_"):
             catalog_id = id.removeprefix("custom_")
             catalog = await db.get_custom_catalog(catalog_id)
-            if not catalog or not catalog.get("visible", True):
+            if not catalog:
                 return {"metas": []}
 
             db_media_type = "tv" if media_type == "series" else "movie"
-            data = await db.get_custom_catalog_items(
-                catalog_id=catalog_id,
-                media_type=db_media_type,
-                page=page,
-                page_size=PAGE_SIZE,
-            )
-            items = data.get("items", [])
+            visible_items = [
+                it for it in (catalog.get("items") or [])
+                if it.get("media_type") == db_media_type
+                and _token_can_view(*_effective_visibility(catalog, it), token_data)
+            ]
+            start = (page - 1) * PAGE_SIZE
+            items = []
+            for it in visible_items[start:start + PAGE_SIZE]:
+                doc = await db.get_document(it.get("media_type"), int(it.get("tmdb_id")), int(it.get("db_index", 1)))
+                if doc:
+                    items.append(doc)
         elif search_query:
-            search_results = await db.search_documents(query=search_query, page=page, page_size=PAGE_SIZE)
+            search_results = await db.search_documents(
+                query=search_query, page=page, page_size=PAGE_SIZE,
+                extra_filter=_visibility_query(token_data),
+            )
             all_items = search_results.get("results", [])
             db_media_type = "tv" if media_type == "series" else "movie"
             items = [item for item in all_items if item.get("media_type") == db_media_type]
@@ -336,11 +393,12 @@ async def get_catalog(token: str, media_type: str, id: str, extra: Optional[str]
             else:
                 sort_params = [("updated_on", "desc")]
 
+            vis_filter = _visibility_query(token_data)
             if media_type == "movie":
-                data = await db.sort_movies(sort_params, page, PAGE_SIZE, genre_filter=genre_filter)
+                data = await db.sort_movies(sort_params, page, PAGE_SIZE, genre_filter=genre_filter, extra_filter=vis_filter)
                 items = data.get("movies", [])
             else:
-                data = await db.sort_tv_shows(sort_params, page, PAGE_SIZE, genre_filter=genre_filter)
+                data = await db.sort_tv_shows(sort_params, page, PAGE_SIZE, genre_filter=genre_filter, extra_filter=vis_filter)
                 items = data.get("tv_shows", [])
     except Exception:
         return {"metas": []}
@@ -359,6 +417,9 @@ async def get_meta(token: str, media_type: str, id: str, token_data: dict = Depe
 
     media = await db.get_media_details(imdb_id=imdb_id)
     if not media:
+        return {"meta": {}}
+
+    if not _token_can_view(media.get("visibility") or "public", media.get("allowed_tokens") or [], token_data):
         return {"meta": {}}
 
     meta_obj = {
@@ -535,6 +596,9 @@ async def get_streams(
         episode_num = int(parts[2]) if len(parts) > 2 else None
     except (ValueError, IndexError):
         raise HTTPException(status_code=400, detail="Invalid Stremio ID format")
+
+    if not await _title_allowed(imdb_id, token_data):
+        return {"streams": []}
 
     media_details = await db.get_media_details(
         imdb_id=imdb_id,

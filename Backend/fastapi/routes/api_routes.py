@@ -1,7 +1,10 @@
 import asyncio
 import json
+import random
+import secrets
 from datetime import datetime
 from time import time
+from urllib.parse import quote
 
 from fastapi import HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -13,10 +16,12 @@ from Backend.helper.auto_catalog import (
     get_auto_catalog_settings,
     get_auto_catalog_sync_status,
     start_auto_catalog_sync_background,
+    start_single_media_catalog_sync,
     update_auto_catalog_settings,
 )
 from Backend.helper.custom_dl import ByteStreamer, _speed_test_single_client, run_speed_test
-from Backend.helper.encrypt import decode_string
+from Backend.helper.encrypt import decode_string, encode_string
+from Backend.helper.manual_add import resolve_telegram_message
 from Backend.helper.metadata import (
     fetch_selected_movie_metadata,
     fetch_selected_tv_metadata,
@@ -27,6 +32,7 @@ from Backend.helper.passwords import hash_password
 from Backend.helper.pyro import get_readable_time
 from Backend.helper.scan_manager import dbcheck_manager, scan_manager
 from Backend.helper.settings_manager import SettingsManager
+from Backend.helper.split_files import strip_part_suffix
 from Backend.logger import LOGGER
 from Backend.pyrofork.bot import (
     StreamBot,
@@ -767,6 +773,222 @@ async def apply_media_rescan_api(request: Request, tmdb_id: int, db_index: int, 
 }
 
 
+#----- Manual add: resolve a Telegram post link into a streamable file
+async def resolve_telegram_api(payload: dict) -> dict:
+    client = _scan_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="No Telegram client is connected yet.")
+    try:
+        data = await resolve_telegram_message(
+            client,
+            url=payload.get("url"),
+            chat_id=payload.get("chat_id"),
+            msg_id=payload.get("msg_id"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read that message: {exc}")
+    return {"status": "success", "data": data}
+
+
+#----- Build a metadata base (title-level fields) from various sources
+def _metadata_base(source: dict, from_doc: bool = False) -> dict:
+    genres = source.get("genres")
+    if isinstance(genres, str):
+        genres = [g.strip() for g in genres.split(",") if g.strip()]
+    year = source.get("release_year") if from_doc else source.get("year")
+    rate = source.get("rating") if from_doc else source.get("rate")
+    return {
+        "tmdb_id": source.get("tmdb_id"),
+        "imdb_id": source.get("imdb_id") or None,
+        "title": (source.get("title") or "").strip(),
+        "year": int(year) if str(year or "").strip().lstrip("-").isdigit() else 0,
+        "rate": float(rate) if str(rate or "").replace(".", "", 1).isdigit() else 0,
+        "description": source.get("description") or "",
+        "poster": source.get("poster") or "",
+        "backdrop": source.get("backdrop") or "",
+        "logo": source.get("logo") or "",
+        "genres": genres or [],
+        "cast": source.get("cast") or [],
+        "runtime": str(source.get("runtime") or ""),
+        "original_language": source.get("original_language"),
+        "origin_country": source.get("origin_country") or [],
+    }
+
+
+_PLACEHOLDER_GENRES = ["Action", "Adventure", "Comedy", "Drama", "Fantasy",
+                       "Thriller", "Mystery", "Sci-Fi", "Romance", "Family"]
+_PLACEHOLDER_DESCRIPTIONS = [
+    "A gripping story full of unexpected twists and turns.",
+    "An unforgettable journey that keeps you on the edge of your seat.",
+    "A captivating tale of drama, courage and emotion.",
+    "An entertaining experience packed with memorable moments.",
+    "A thrilling adventure blending heart, action and wonder.",
+]
+
+
+#----- Gradient placeholder cover for titles without artwork
+def _gradient_cover(title: str, portrait: bool = False) -> str:
+    text = quote((title or "Media").strip() or "Media")
+    url = f"https://gradient-cover-api.vercel.app/api/image?text={text}&badge="
+    return f"{url}&orientation=portrait" if portrait else url
+
+
+#----- Fill empty optional metadata with random values and gradient artwork
+def _fill_placeholder_metadata(meta: dict) -> None:
+    title = meta.get("title") or "Media"
+    if not meta.get("poster"):
+        meta["poster"] = _gradient_cover(title, portrait=True)
+    if not meta.get("backdrop"):
+        meta["backdrop"] = _gradient_cover(title)
+    if not meta.get("genres"):
+        meta["genres"] = random.sample(_PLACEHOLDER_GENRES, random.randint(1, 3))
+    if not meta.get("rate"):
+        meta["rate"] = round(random.uniform(6.0, 8.9), 1)
+    if not meta.get("description"):
+        meta["description"] = random.choice(_PLACEHOLDER_DESCRIPTIONS)
+
+
+#----- Manual add: create/append a movie, tv show, season, episode or stream by hand
+async def manual_add_media_api(payload: dict) -> dict:
+    media_type = payload.get("media_type")
+    if media_type not in ("movie", "tv"):
+        raise HTTPException(status_code=400, detail="media_type must be 'movie' or 'tv'.")
+
+    stream = payload.get("stream") or {}
+    quality = str(stream.get("quality") or "").strip()
+    if not quality:
+        raise HTTPException(status_code=400, detail="A quality label (e.g. 1080p) is required.")
+
+    #----- One source = single file, multiple sources = split file parts (in order)
+    part_sources = stream.get("parts")
+    if not isinstance(part_sources, list) or not part_sources:
+        part_sources = [{"url": stream.get("url"), "chat_id": stream.get("chat_id"), "msg_id": stream.get("msg_id")}]
+    part_sources = [p for p in part_sources if p and (p.get("url") or (p.get("chat_id") and p.get("msg_id")))]
+    if not part_sources:
+        raise HTTPException(status_code=400, detail="Provide at least one Telegram message link.")
+
+    client = _scan_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="No Telegram client is connected yet.")
+
+    resolved_parts = []
+    for src in part_sources:
+        try:
+            resolved_parts.append(await resolve_telegram_message(
+                client, url=src.get("url"), chat_id=src.get("chat_id"), msg_id=src.get("msg_id"),
+            ))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not read that message: {exc}")
+
+    primary = resolved_parts[0]
+    is_split = len(resolved_parts) > 1
+    raw_name = (stream.get("name") or primary["name"]).strip()
+    name = strip_part_suffix(raw_name) if is_split else raw_name
+
+    #----- Resolve the title-level metadata: existing doc, TMDB/IMDb pick, or manual entry
+    tmdb_id = payload.get("tmdb_id")
+    db_index = payload.get("db_index")
+    selected_id = str(payload.get("selected_id") or "").strip()
+
+    base = None
+    if tmdb_id and db_index:
+        doc = await db.get_document(media_type, int(tmdb_id), int(db_index))
+        if doc:
+            base = _metadata_base(doc, from_doc=True)
+    if base is None and selected_id:
+        selection = await (
+            fetch_selected_movie_metadata(selected_id) if media_type == "movie"
+            else fetch_selected_tv_metadata(selected_id)
+        )
+        if not selection:
+            raise HTTPException(status_code=404, detail="Could not fetch metadata for the selected title.")
+        base = _metadata_base(selection, from_doc=True)
+    if base is None:
+        base = _metadata_base(payload.get("manual_metadata") or {})
+        if not base["title"]:
+            raise HTTPException(status_code=400, detail="A title is required for manual entry.")
+        if not base["year"]:
+            base["year"] = int(primary.get("upload_year") or 0)
+
+    #----- Brand-new hand-made titles get a negative synthetic id (never collides with TMDB)
+    if not base.get("tmdb_id"):
+        base["tmdb_id"] = -(secrets.randbelow(2_000_000_000) + 1)
+    #----- A synthetic "tg" imdb id is required so Stremio can request meta/streams
+    if not base.get("imdb_id"):
+        base["imdb_id"] = f"tg{abs(int(base['tmdb_id']))}"
+    _fill_placeholder_metadata(base)
+
+    #----- Use the file's own thumbnail as artwork when available
+    base_url = SettingsManager.current().base_url
+    thumb_url = ""
+    if primary.get("has_thumb") and base_url:
+        thumb_enc = await encode_string({"chat_id": int(primary["chat_id"]), "msg_id": int(primary["msg_id"])})
+        thumb_url = f"{base_url}/thumb/{thumb_enc}"
+
+    #----- Split parts share one quality entry via a common group key
+    group_key = f"manual:{primary['chat_id']}:{quality}:{secrets.token_hex(6)}" if is_split else None
+
+    tv_extra = {}
+    if media_type == "tv":
+        try:
+            season_number = int(payload.get("season_number"))
+            episode_number = int(payload.get("episode_number"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Season and episode numbers are required for TV.")
+        tv_extra = {
+            "season_number": season_number,
+            "episode_number": episode_number,
+            "episode_title": (payload.get("episode_title") or "").strip() or f"S{season_number:02d}E{episode_number:02d}",
+            "episode_backdrop": payload.get("episode_backdrop") or thumb_url or base.get("backdrop") or "",
+            "episode_overview": payload.get("episode_overview") or "",
+            "episode_released": payload.get("episode_released") or "",
+        }
+
+    for index, part in enumerate(resolved_parts, start=1):
+        p_channel = int(part["chat_id"])
+        p_msg = int(part["msg_id"])
+        encoded = await encode_string({"chat_id": p_channel, "msg_id": p_msg})
+        metadata_info = dict(base)
+        metadata_info.update({
+            "media_type": media_type,
+            "quality": quality,
+            "encoded_string": encoded,
+            "group_key": group_key,
+            "part_number": index if is_split else None,
+            "is_anime": False,
+        })
+        metadata_info.update(tv_extra)
+        updated_id = await db.insert_media(
+            metadata_info, channel=p_channel, msg_id=p_msg,
+            size=part["size"], name=name, raw_size=int(part.get("raw_size") or 0),
+        )
+        if not updated_id:
+            raise HTTPException(status_code=500, detail="Failed to add media (validation error).")
+
+    result_tmdb_id = base["tmdb_id"]
+    location = await db.find_media_doc(media_type, result_tmdb_id)
+    result_db_index = location[1] if location else db.current_db_index
+
+    if result_tmdb_id and result_tmdb_id > 0:
+        try:
+            start_single_media_catalog_sync(db, tmdb_id=result_tmdb_id, media_type=media_type)
+        except Exception:
+            pass
+
+    message = f"Split stream added ({len(resolved_parts)} parts)." if is_split else "Stream added successfully."
+    return {
+        "status": "success",
+        "message": message,
+        "tmdb_id": result_tmdb_id,
+        "db_index": result_db_index,
+        "media_type": media_type,
+    }
+
+
 #----- Custom catalog APIs
 def _normalize_media_type(media_type: str) -> str:
     return "tv" if media_type in ["tv", "series"] else "movie"
@@ -793,13 +1015,26 @@ async def list_custom_catalogs_api(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_VISIBILITY_MODES = ("public", "tokens", "owner")
+
+
+#----- Parse a (visibility, allowed_tokens) pair from a request payload
+def _clean_visibility(payload: dict):
+    visibility = payload.get("visibility")
+    if visibility not in _VISIBILITY_MODES:
+        visibility = None
+    tokens = payload.get("allowed_tokens")
+    tokens = [str(t).strip() for t in tokens if str(t).strip()] if isinstance(tokens, list) else []
+    return visibility, tokens
+
+
 async def create_custom_catalog_api(payload: dict):
     name = (payload.get("name") or "").strip()
-    visible = bool(payload.get("visible", True))
     if not name:
         raise HTTPException(status_code=400, detail="Catalog name is required.")
 
-    catalog_id = await db.create_custom_catalog(name=name, visible=visible)
+    visibility, tokens = _clean_visibility(payload)
+    catalog_id = await db.create_custom_catalog(name=name, visibility=visibility or "public", allowed_tokens=tokens)
     if not catalog_id:
         raise HTTPException(status_code=500, detail="Failed to create catalog.")
 
@@ -809,13 +1044,41 @@ async def create_custom_catalog_api(payload: dict):
 
 async def update_custom_catalog_api(catalog_id: str, payload: dict):
     name = payload.get("name")
-    visible = payload.get("visible") if "visible" in payload else None
-    result = await db.update_custom_catalog(catalog_id, name=name, visible=visible)
+    visibility, tokens = _clean_visibility(payload)
+    result = await db.update_custom_catalog(catalog_id, name=name, visibility=visibility, allowed_tokens=tokens)
     if not result:
         catalog = await db.get_custom_catalog(catalog_id)
         if not catalog:
             raise HTTPException(status_code=404, detail="Catalog not found.")
     return {"message": "Catalog updated successfully.", "catalog": await db.get_custom_catalog(catalog_id)}
+
+
+#----- Set a title's visibility across every catalog it belongs to (used by media edit)
+async def set_media_visibility_api(payload: dict):
+    tmdb_id = payload.get("tmdb_id")
+    db_index = payload.get("db_index")
+    media_type = payload.get("media_type")
+    if not tmdb_id or not db_index or media_type not in ("movie", "tv", "series"):
+        raise HTTPException(status_code=400, detail="tmdb_id, db_index and media_type are required.")
+
+    visibility, tokens = _clean_visibility(payload)
+    if not visibility:
+        raise HTTPException(status_code=400, detail="A valid visibility is required.")
+
+    count = await db.set_media_visibility(
+        int(tmdb_id), int(db_index), _normalize_media_type(media_type), visibility, tokens
+    )
+    return {
+        "status": "success",
+        "updated_catalogs": count,
+        "message": "Visibility updated — applies to default catalogs and every catalog this title is in.",
+    }
+
+
+#----- Current effective visibility of a title (from the catalogs it belongs to)
+async def get_media_visibility_api(tmdb_id: int, db_index: int, media_type: str):
+    data = await db.get_media_visibility(int(tmdb_id), int(db_index), _normalize_media_type(media_type))
+    return {"visibility": data or {}}
 
 
 async def delete_custom_catalog_api(catalog_id: str):
@@ -973,7 +1236,7 @@ async def update_settings_api(payload: dict) -> dict:
         if key in payload:
             payload[key] = bool(payload[key])
 
-    list_str_keys = {"auth_channels", "multi_tokens", "extra_databases", "global_search_channels", "anime_channels"}
+    list_str_keys = {"auth_channels", "multi_tokens", "extra_databases", "global_search_channels", "anime_channels", "manual_channels"}
     for key in list_str_keys:
         if key in payload:
             if not isinstance(payload[key], list):
@@ -1030,6 +1293,21 @@ async def update_settings_api(payload: dict) -> dict:
                     )
             cleaned.append(channel)
         payload["anime_channels"] = cleaned
+
+    if "manual_channels" in payload:
+        cleaned = []
+        for channel in payload["manual_channels"]:
+            channel = str(channel).strip()
+            if not channel:
+                continue
+            try:
+                int(channel.replace("-100", ""))
+            except ValueError:
+                raise HTTPException(status_code=400,
+                    detail=f"Invalid manual channel id: {channel}"
+                    )
+            cleaned.append(channel)
+        payload["manual_channels"] = cleaned
 
     #----- Strip whitespace from string fields
     for key in ("tmdb_api", "base_url", "upstream_repo", "upstream_branch",
