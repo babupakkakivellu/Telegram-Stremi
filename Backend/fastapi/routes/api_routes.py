@@ -21,9 +21,19 @@ from Backend.helper.auto_catalog import (
     start_single_media_catalog_sync,
     update_auto_catalog_settings,
 )
+from Backend.helper.backup import export_config, import_config
 from Backend.helper.custom_dl import ByteStreamer, _speed_test_single_client, run_speed_test
 from Backend.helper.encrypt import decode_string, encode_string
+from Backend.helper.health import run_health_checks
 from Backend.helper.manual_add import resolve_telegram_message
+from Backend.helper.requests_manager import (
+    delete_request,
+    list_requests,
+    popular_pending,
+    search_titles,
+    set_status,
+    submit_request,
+)
 from Backend.helper.metadata import (
     fetch_selected_movie_metadata,
     fetch_selected_tv_metadata,
@@ -32,7 +42,7 @@ from Backend.helper.metadata import (
     search_movie_candidates,
     search_tv_candidates,
 )
-from Backend.helper.passwords import hash_password
+from Backend.helper.passwords import hash_password, verify_password
 from Backend.helper.pyro import get_readable_file_size, get_readable_time
 from Backend.helper.scan_manager import dbcheck_manager, scan_manager
 from Backend.helper.settings_manager import SettingsManager
@@ -41,6 +51,7 @@ from Backend.logger import LOGGER
 from Backend.pyrofork.bot import (
     StreamBot,
     client_avg_mbps,
+    client_dc_map,
     client_failures,
     multi_clients,
     work_loads,
@@ -429,7 +440,8 @@ async def get_admin_stats_api() -> dict:
 
         bot_stats.append({
             "client_index": client_index,
-            "display_name": f"Bot {client_index + 1}",
+            "display_name": "Userbot" if client_index < 0 else f"Bot {client_index + 1}",
+            "dc": client_dc_map.get(client_index),
             "current_load": load,
             "failures": failures,
             "avg_mbps": round(mbps, 2),
@@ -484,6 +496,62 @@ async def clear_stream_analytics_api() -> dict:
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+#----- Public: search titles to request (by name, IMDb id or TMDB id)
+async def request_search_api(q: str) -> dict:
+    try:
+        return {"status": "success", "data": await search_titles(q)}
+    except Exception as e:
+        LOGGER.error(f"Request search error: {e}")
+        return {"status": "error", "message": str(e), "data": []}
+
+
+#----- Public: submit a request for a title
+async def request_submit_api(payload: dict, client_ip: str) -> dict:
+    result = await submit_request(
+        media_type=payload.get("media_type"),
+        tmdb_id=payload.get("tmdb_id"),
+        imdb_id=payload.get("imdb_id"),
+        title=payload.get("title"),
+        year=payload.get("year"),
+        poster=payload.get("poster"),
+        client_ip=client_ip,
+    )
+    return {"status": "success" if result.get("ok") else "error", **result}
+
+
+#----- Public: most-requested pending titles
+async def request_popular_api() -> dict:
+    try:
+        return {"status": "success", "data": await popular_pending()}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "data": []}
+
+
+#----- Admin: list all content requests
+async def get_requests_api() -> dict:
+    try:
+        return {"status": "success", "data": await list_requests()}
+    except Exception as e:
+        LOGGER.error(f"Requests API error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+#----- Admin: uploaded / denied / banned / pending
+async def update_request_api(request_id: str, payload: dict) -> dict:
+    new_status = str(payload.get("status", "")).strip()
+    doc = await set_status(request_id, new_status)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Request not found or invalid status.")
+    return {"status": "success", "data": doc}
+
+
+async def delete_request_api(request_id: str) -> dict:
+    if not await delete_request(request_id):
+        raise HTTPException(status_code=404, detail="Request not found.")
+    return {"status": "success", "message": "Request deleted."}
+
 
 #----- Admin subscription management
 async def get_subscription_plans_api() -> dict:
@@ -1186,9 +1254,9 @@ async def remove_custom_catalog_item_api(
     return {"message": "Removed from catalog.", "removed": True}
 
 
-async def auto_sync_custom_catalogs_api(full_rebuild: bool = False):
+async def auto_sync_custom_catalogs_api(force_refresh: bool = False):
     try:
-        result = await start_auto_catalog_sync_background(db, force=True, full_rebuild=full_rebuild)
+        result = await start_auto_catalog_sync_background(db, force=True, force_refresh=force_refresh)
         return {"message": result.get("message", "Auto sync started."), "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1254,7 +1322,7 @@ async def update_settings_api(payload: dict) -> dict:
         del payload["session_secret"]
 
     #----- Type coercion and validation
-    bool_keys = {"replace_mode", "hide_catalog", "subscription", "show_proxy_and_non_proxy_both"}
+    bool_keys = {"replace_mode", "hide_catalog", "subscription", "show_proxy_and_non_proxy_both", "announce_new_content"}
     for key in bool_keys:
         if key in payload:
             payload[key] = bool(payload[key])
@@ -1335,7 +1403,7 @@ async def update_settings_api(payload: dict) -> dict:
     #----- Strip whitespace from string fields
     for key in ("tmdb_api", "base_url", "upstream_repo", "upstream_branch",
                 "admin_username", "admin_password", "session_secret", "http_proxy_url",
-                "payment_instructions", "payment_qr_url"):
+                "payment_instructions", "payment_qr_url", "announcement_channel"):
         if key in payload and isinstance(payload[key], str):
             payload[key] = payload[key].strip()
 
@@ -1503,9 +1571,54 @@ async def get_db_stats_api() -> dict:
         return {"status": "error", "message": str(e)}
 
 
+#----- First-run setup checklist: what's configured vs still missing
+async def setup_status_api() -> dict:
+    s = SettingsManager.current()
+    checks = [
+        {"key": "tmdb", "label": "TMDB API key", "done": bool(s.tmdb_api),
+         "hint": "Powers automatic poster & metadata matching."},
+        {"key": "channels", "label": "AUTH channel added", "done": len(s.auth_channels) > 0,
+         "hint": "The channel(s) the bot indexes and streams from."},
+        {"key": "base_url", "label": "Base URL set", "done": bool(s.base_url),
+         "hint": "Stremio uses this public address to reach your streams."},
+        {"key": "password", "label": "Admin password changed", "done": not verify_password("admin", s.admin_password),
+         "hint": "Change the default admin / admin login for security."},
+    ]
+    done = sum(1 for c in checks if c["done"])
+    return {"status": "success", "data": {
+        "checks": checks, "done": done, "total": len(checks), "complete": done == len(checks),
+    }}
+
+
+#----- Config backup export (settings minus secrets + catalogs, plans, tokens)
+async def export_config_api() -> dict:
+    return await export_config()
+
+
+#----- Config backup restore
+async def import_config_api(payload: dict) -> dict:
+    try:
+        result = await import_config(payload)
+        return {"status": "success", "result": result, "message": "Backup restored successfully."}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        LOGGER.error(f"Config import error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 #----- Lightweight liveness probe; start_time changes on every boot (restart detection)
 async def health_api() -> dict:
     return {"status": "ok", "start_time": StartTime, "version": __version__}
+
+
+#----- Full diagnostics report (DBs, bot clients, TMDB, base URL)
+async def health_report_api(force: bool = False) -> dict:
+    try:
+        return {"status": "success", "data": await run_health_checks(force=force)}
+    except Exception as e:
+        LOGGER.error(f"Health report error: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 #----- Tail of the log file for the web viewer (was /log)

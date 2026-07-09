@@ -8,11 +8,14 @@ from pyrogram.types import Message
 
 import Backend
 from Backend import db
+from Backend.helper.announcer import announce_new_media
 from Backend.helper.auto_catalog import start_single_media_catalog_sync
+from Backend.helper.requests_manager import auto_fulfill
 from Backend.helper.metadata import extract_default_id, metadata
 from Backend.helper.pyro import clean_filename, finalize_media_name, get_readable_file_size
 from Backend.helper.settings_manager import SettingsManager
 from Backend.helper.split_files import parse_split_info
+from Backend.helper.subtitles import ingest_subtitle, is_subtitle_file, remove_subtitle
 from Backend.helper.task_manager import edit_message
 from Backend.logger import LOGGER
 
@@ -69,6 +72,12 @@ async def process_file():
                 tmdb_id=metadata_info.get("tmdb_id"),
                 media_type=metadata_info.get("media_type"),
             )
+            announce_new_media(metadata_info)
+            create_task(auto_fulfill(
+                tmdb_id=metadata_info.get("tmdb_id"),
+                imdb_id=metadata_info.get("imdb_id"),
+                media_type=metadata_info.get("media_type"),
+            ))
         file_queue.task_done()
 
 
@@ -84,6 +93,12 @@ async def file_receive_handler(client: Client, message: Message):
         await message.reply_text("> Channel is not in AUTH_CHANNEL")
         return
     try:
+        sub_name = (message.document.file_name if message.document else "") or ""
+        if sub_name and is_subtitle_file(sub_name):
+            channel = str(message.chat.id).replace("-100", "")
+            create_task(ingest_subtitle(sub_name, int(channel), message.id))
+            return
+
         if not _is_supported_media(message):
             await message.reply_text("> Not supported")
             return
@@ -154,6 +169,8 @@ async def file_deleted_handler(client: Client, messages: list[Message]):
             try:
                 if await db.remove_media_part(int(channel), msg_id):
                     LOGGER.info(f"Automatically purged deleted message {msg_id} from database.")
+                if await remove_subtitle(int(channel), msg_id):
+                    LOGGER.info(f"Automatically purged deleted subtitle {msg_id} from database.")
             except Exception as ex:
                 LOGGER.error(f"Failed to scrub deleted message {msg_id}: {ex}")
     except Exception as e:

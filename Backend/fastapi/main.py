@@ -24,7 +24,10 @@ from Backend.fastapi.routes.api_routes import (
     delete_custom_catalog_api,
     delete_media_api,
     delete_movie_quality_api,
+    delete_request_api,
     delete_subscription_plan_api,
+    export_config_api,
+    import_config_api,
     delete_tv_episode_api,
     delete_tv_quality_api,
     delete_tv_season_api,
@@ -37,6 +40,10 @@ from Backend.fastapi.routes.api_routes import (
     get_custom_catalog_items_api,
     get_dead_links_api,
     get_media_visibility_api,
+    get_requests_api,
+    request_popular_api,
+    request_search_api,
+    request_submit_api,
     get_stream_analytics_api,
     get_subscription_plans_api,
     get_settings_api,
@@ -44,6 +51,8 @@ from Backend.fastapi.routes.api_routes import (
     get_system_stats_api,
     get_tools_channels_api,
     health_api,
+    health_report_api,
+    setup_status_api,
     link_token_user_api,
     list_custom_catalogs_api,
     list_media_api,
@@ -65,6 +74,7 @@ from Backend.fastapi.routes.api_routes import (
     update_auto_catalog_settings_api,
     update_custom_catalog_api,
     update_media_api,
+    update_request_api,
     update_settings_api,
     update_subscription_plan_api,
     update_token_limits_api,
@@ -75,7 +85,9 @@ from Backend.fastapi.routes.stremio_routes import router as stremio_router
 from Backend.fastapi.routes.template_routes import (
     admin_access_page,
     admin_dashboard_page,
+    admin_requests_page,
     admin_subscriptions_page,
+    public_request_page,
     custom_catalogs_page,
     dashboard_page,
     edit_media_page,
@@ -303,6 +315,43 @@ async def link_token_to_user(token: str, payload: dict, _: bool = Depends(requir
         raise HTTPException(status_code=400, detail="user_id is required.")
     return await link_token_user_api(token, user_id)
 
+
+#----- Public content request page (no auth)
+@app.get("/request", response_class=HTMLResponse)
+async def public_request(request: Request):
+    return await public_request_page(request)
+
+@app.get("/api/request/search")
+async def request_search(q: str = Query("")):
+    return await request_search_api(q)
+
+@app.get("/api/request/popular")
+async def request_popular():
+    return await request_popular_api()
+
+@app.post("/api/request/submit")
+async def request_submit(payload: dict, request: Request):
+    client_ip = request.client.host if request.client else None
+    return await request_submit_api(payload, client_ip)
+
+
+#----- Admin content requests
+@app.get("/admin/requests", response_class=HTMLResponse)
+async def admin_requests(request: Request, _: bool = Depends(require_auth)):
+    return await admin_requests_page(request, _)
+
+@app.get("/api/admin/requests")
+async def get_requests(_: bool = Depends(require_auth)):
+    return await get_requests_api()
+
+@app.patch("/api/admin/requests/{request_id}")
+async def update_request(request_id: str, payload: dict, _: bool = Depends(require_auth)):
+    return await update_request_api(request_id, payload)
+
+@app.delete("/api/admin/requests/{request_id}")
+async def delete_request_route(request_id: str, _: bool = Depends(require_auth)):
+    return await delete_request_api(request_id)
+
 @app.get("/api/system/speedtest")
 async def speed_test(
     quality_id: str = Query(...),
@@ -400,10 +449,10 @@ async def search_catalog_media(
 
 @app.post("/api/custom-catalogs/auto-sync")
 async def auto_sync_custom_catalogs(
-    full_rebuild: bool = Query(False),
+    force_refresh: bool = Query(False),
     _: bool = Depends(require_auth)
 ):
-    return await auto_sync_custom_catalogs_api(full_rebuild)
+    return await auto_sync_custom_catalogs_api(force_refresh)
 
 @app.get("/api/custom-catalogs/auto-sync/status")
 async def auto_catalog_sync_status(_: bool = Depends(require_auth)):
@@ -464,6 +513,27 @@ async def admin_db_stats(_: bool = Depends(require_auth)):
 @app.get("/api/admin/health")
 async def admin_health(_: bool = Depends(require_auth)):
     return await health_api()
+
+@app.get("/api/admin/health/report")
+async def admin_health_report(fresh: bool = Query(False), _: bool = Depends(require_auth)):
+    return await health_report_api(force=fresh)
+
+@app.get("/api/admin/setup-status")
+async def admin_setup_status(_: bool = Depends(require_auth)):
+    return await setup_status_api()
+
+@app.get("/api/admin/backup/export")
+async def admin_backup_export(_: bool = Depends(require_auth)):
+    from fastapi.responses import JSONResponse
+    data = await export_config_api()
+    return JSONResponse(
+        content=data,
+        headers={"Content-Disposition": 'attachment; filename="telegram-stremio-backup.json"'},
+    )
+
+@app.post("/api/admin/backup/import")
+async def admin_backup_import(payload: dict, _: bool = Depends(require_auth)):
+    return await import_config_api(payload)
 
 @app.get("/api/admin/logs")
 async def admin_logs(lines: int = Query(300, ge=1, le=2000), _: bool = Depends(require_auth)):

@@ -207,6 +207,45 @@ async def thumb_handler(id: str):
     )
 
 
+_SUBTITLE_MIME = {
+    ".srt": "application/x-subrip",
+    ".vtt": "text/vtt",
+    ".ass": "text/x-ssa",
+    ".ssa": "text/x-ssa",
+    ".sub": "text/plain",
+}
+
+
+#----- Serve a subtitle file fully in-memory (files are small)
+@router.get("/sub/{token}/{id}/{name}")
+async def subtitle_handler(token: str, id: str, name: str, token_data: dict = Depends(verify_token)):
+    try:
+        decoded = await decode_string(id)
+        chat_id = int(f"-100{decoded['chat_id']}")
+        msg_id = int(decoded["msg_id"])
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid subtitle id")
+
+    if not multi_clients:
+        raise HTTPException(status_code=503, detail="No client available")
+
+    client = multi_clients[select_best_client(0)]
+    try:
+        message = await client.get_messages(chat_id, msg_id)
+        buf = await client.download_media(message, in_memory=True)
+        data = buf.getvalue()
+    except Exception as e:
+        LOGGER.warning(f"[SUBTITLE] fetch failed for {id}: {e}")
+        raise HTTPException(status_code=404, detail="Subtitle unavailable")
+
+    ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ".srt"
+    return PlainResponse(
+        content=data,
+        media_type=_SUBTITLE_MIME.get(ext, "application/octet-stream"),
+        headers={"Cache-Control": "public, max-age=86400", "Access-Control-Allow-Origin": "*"},
+    )
+
+
 #----- Entry point: decode the id and dispatch to the matching streamer
 @router.get("/dl/{token}/{id}/{name}")
 @router.head("/dl/{token}/{id}/{name}")
@@ -257,7 +296,8 @@ async def media_streamer(request: Request, chat_id: int, msg_id: int, token: str
         "request_path": str(request.url.path),
         "client_host": request.client.host if request.client else None,
         "title": final_title,
-        "user_name": token_data.get("name", "Unknown") if token_data else "Unknown"
+        "user_name": token_data.get("name", "Unknown") if token_data else "Unknown",
+        "token": token,
     }
 
     token_count = len(multi_clients) - 1
@@ -330,6 +370,7 @@ async def virtual_media_streamer(request: Request, parts_payload: list, token: s
         "client_host": request.client.host if request.client else None,
         "title": final_title,
         "user_name": token_data.get("name", "Unknown") if token_data else "Unknown",
+        "token": token,
         "split_parts": len(parts),
     }
 
@@ -394,6 +435,7 @@ async def global_media_streamer(request: Request, chat_id: int, msg_id: int, tok
         "client_host": request.client.host if request.client else None,
         "title": file_id.file_name or "global-stream",
         "user_name": token_data.get("name", "Unknown") if token_data else "Unknown",
+        "token": token,
         "global_search": True,
     }
 
