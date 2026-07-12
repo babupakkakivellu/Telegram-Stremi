@@ -11,6 +11,7 @@ from time import time
 from fastapi import HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
+import Backend
 from Backend import StartTime, __version__, db
 from Backend.fastapi.routes.stream_routes import _streamer_by_client
 from Backend.fastapi.routes.stremio_routes import invalidate_membership_cache
@@ -35,6 +36,7 @@ from Backend.helper.requests_manager import (
     submit_request,
 )
 from Backend.helper.metadata import (
+    extract_default_id,
     fetch_selected_movie_metadata,
     fetch_selected_tv_metadata,
     gradient_cover_path,
@@ -852,6 +854,25 @@ async def apply_media_rescan_api(request: Request, tmdb_id: int, db_index: int, 
 }
 
 
+#----- Manual add: fetch full metadata for a selected TMDB/IMDB title to autofill the form
+async def resolve_manual_metadata_api(media_type: str, selected_id: str) -> dict:
+    selected_id = str(selected_id or "").strip()
+    if not selected_id:
+        raise HTTPException(status_code=400, detail="selected_id is required.")
+    mt = _normalize_media_type(media_type)
+    data = await (
+        fetch_selected_movie_metadata(selected_id) if mt == "movie"
+        else fetch_selected_tv_metadata(selected_id)
+    )
+    if not data:
+        raise HTTPException(status_code=404, detail="Could not fetch metadata for the selected title.")
+    if data.get("poster"):
+        data["poster"] = resolve_cover_url(data["poster"])
+    if data.get("backdrop"):
+        data["backdrop"] = resolve_cover_url(data["backdrop"])
+    return {"metadata": data}
+
+
 #----- Manual add: resolve a Telegram post link into a streamable file
 async def resolve_telegram_api(payload: dict) -> dict:
     client = _scan_client()
@@ -1044,6 +1065,36 @@ async def manual_add_media_api(payload: dict) -> dict:
     location = await db.find_media_doc(media_type, result_tmdb_id)
     result_db_index = location[1] if location else db.current_db_index
 
+    #----- Assign to selected custom catalogs before triggering auto sync, so any
+    #----- exclusivity is stamped on the doc first and auto sync correctly skips it.
+    #----- Guarded on `location` so we never add a reference to a non-existent doc.
+    catalog_ids = payload.get("catalog_ids") or []
+    catalogs_added = []
+    if location:
+        for cat_id in catalog_ids:
+            try:
+                cat_id = str(cat_id).strip()
+                if not cat_id:
+                    continue
+                added = await db.add_item_to_custom_catalog(cat_id, int(result_tmdb_id), int(result_db_index), media_type)
+                if added:
+                    catalog = await db.get_custom_catalog(cat_id)
+                    if catalog:
+                        catalogs_added.append(catalog.get("name", cat_id))
+                        cat_vis = catalog.get("visibility")
+                        if cat_vis in ("owner", "tokens"):
+                            await db.set_media_visibility(
+                                int(result_tmdb_id), int(result_db_index), media_type,
+                                cat_vis, catalog.get("allowed_tokens") or []
+                            )
+                        if catalog.get("exclusive"):
+                            await db.mark_item_exclusive(
+                                cat_id, int(result_tmdb_id), int(result_db_index),
+                                media_type, catalog.get("searchable", False)
+                            )
+            except Exception:
+                pass
+
     if result_tmdb_id and result_tmdb_id > 0:
         try:
             start_single_media_catalog_sync(db, tmdb_id=result_tmdb_id, media_type=media_type)
@@ -1051,6 +1102,8 @@ async def manual_add_media_api(payload: dict) -> dict:
             pass
 
     message = f"Split stream added ({len(resolved_parts)} parts)." if is_split else "Stream added successfully."
+    if catalogs_added:
+        message += f" Added to: {', '.join(catalogs_added)}."
     return {
         "status": "success",
         "message": message,
@@ -1082,6 +1135,20 @@ async def list_custom_catalogs_api(
                     for item in catalog.get("items", []) or []
                 )
         return {"catalogs": catalogs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def list_manual_add_catalogs_api():
+    try:
+        catalogs = await db.get_custom_catalogs()
+        filtered = [c for c in catalogs if not c.get("auto")]
+        filtered.sort(key=lambda c: (0 if c.get("exclusive") else 1, (c.get("name") or "").lower()))
+        return {"catalogs": [
+            {"_id": c["_id"], "name": c["name"], "exclusive": bool(c.get("exclusive")),
+             "visibility": c.get("visibility", "public")}
+            for c in filtered
+        ]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1400,6 +1467,41 @@ async def update_settings_api(payload: dict) -> dict:
             cleaned.append(channel)
         payload["manual_channels"] = cleaned
 
+    #----- The same channel id may not appear in more than one channel field.
+    #----- Only AUTH ∩ ANIME is allowed, because an anime channel is an auth channel
+    #----- that's flagged as anime (the receiver only indexes files from auth channels).
+    _channel_fields = ("auth_channels", "manual_channels", "global_search_channels",
+                       "anime_channels", "announcement_channel")
+    if any(field in payload for field in _channel_fields):
+        current = SettingsManager.current()
+
+        def _norm_ids(values) -> set:
+            if isinstance(values, str):
+                values = [values]
+            return {str(c).strip().replace("-100", "") for c in (values or []) if str(c).strip()}
+
+        groups = {
+            "AUTH": _norm_ids(payload.get("auth_channels", list(current.auth_channels))),
+            "MANUAL": _norm_ids(payload.get("manual_channels", list(current.manual_channels))),
+            "GLOBAL SEARCH": _norm_ids(payload.get("global_search_channels", list(current.global_search_channels))),
+            "ANIME": _norm_ids(payload.get("anime_channels", list(current.anime_channels))),
+            "ANNOUNCEMENT": _norm_ids(payload.get("announcement_channel", current.announcement_channel)),
+        }
+
+        allowed_overlap = frozenset({"AUTH", "ANIME"})
+        names = list(groups)
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                a, b = names[i], names[j]
+                if frozenset({a, b}) == allowed_overlap:
+                    continue
+                clash = groups[a] & groups[b]
+                if clash:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Channel {', '.join(sorted(clash))} can't be in both {a} and {b} channels — each channel may only belong to one field."
+                    )
+
     #----- Strip whitespace from string fields
     for key in ("tmdb_api", "base_url", "upstream_repo", "upstream_branch",
                 "admin_username", "admin_password", "session_secret", "http_proxy_url",
@@ -1450,6 +1552,175 @@ async def get_tools_channels_api() -> dict:
             LOGGER.warning(f"[Tools] Could not resolve channel {ch}: {e}")
         result.append({"id": str(ch), "name": name})
     return {"status": "success", "data": result}
+
+
+#----- ── Manual upload session (web replacement for the /set bot command) ──
+
+#----- Personal (hand-made) titles get a negative synthetic tmdb_id; real ones are positive
+def _is_personal_media(tmdb_id) -> bool:
+    try:
+        return int(tmdb_id) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+#----- Normalize a media document into a compact session-picker result
+def _session_result(doc: dict) -> dict:
+    mt = doc.get("media_type") or doc.get("type") or "movie"
+    mt = "tv" if str(mt).lower() in ("tv", "series") else "movie"
+    return {
+        "tmdb_id": doc.get("tmdb_id"),
+        "db_index": doc.get("db_index"),
+        "media_type": mt,
+        "title": doc.get("title") or "",
+        "year": doc.get("release_year") or "",
+        "poster": resolve_cover_url(doc.get("poster") or ""),
+        "imdb_id": doc.get("imdb_id") or "",
+        "is_personal": _is_personal_media(doc.get("tmdb_id")),
+    }
+
+
+#----- Search the local library by title or an IMDb/TMDB id/link
+async def search_manual_session_api(query: str) -> dict:
+    query = (query or "").strip()
+    if not query:
+        return {"results": []}
+
+    results: list[dict] = []
+    seen: set = set()
+
+    def _add(doc: dict) -> None:
+        entry = _session_result(doc)
+        key = (entry["tmdb_id"], entry["db_index"], entry["media_type"])
+        if entry["tmdb_id"] is None or key in seen:
+            return
+        seen.add(key)
+        results.append(entry)
+
+    #----- Try an id-based lookup first (imdb tt… or a tmdb id/link)
+    default_id = extract_default_id(query)
+    if default_id:
+        try:
+            if str(default_id).startswith("tt"):
+                doc = await db.get_media_details(default_id)
+                if doc:
+                    _add(doc)
+            else:
+                for mt in ("movie", "tv"):
+                    location = await db.find_media_doc(mt, int(default_id))
+                    if location:
+                        found, db_index = location
+                        found["media_type"] = mt
+                        found["db_index"] = db_index
+                        _add(found)
+        except Exception as e:
+            LOGGER.warning(f"[Manual Session] id lookup failed for '{query}': {e}")
+
+    #----- Fall back to a title search
+    if not results:
+        try:
+            data = await db.search_documents(query, 1, 20)
+            for doc in data.get("results", []):
+                _add(doc)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+    return {"results": results}
+
+
+#----- Current active manual upload session (or None)
+async def get_manual_session_api() -> dict:
+    return {"session": getattr(Backend, "MANUAL_SESSION", None)}
+
+
+#----- Activate a manual upload session targeting an existing library title.
+#----- Real (TMDB/IMDb) titles parse season/episode/quality from each file; personal
+#----- (hand-made) titles need a season for TV since their files carry no metadata.
+async def set_manual_session_api(payload: dict) -> dict:
+    tmdb_id = payload.get("tmdb_id")
+    db_index = payload.get("db_index")
+    media_type = _normalize_media_type(payload.get("media_type", "movie"))
+
+    if tmdb_id is None or db_index is None:
+        raise HTTPException(status_code=400, detail="tmdb_id and db_index are required.")
+
+    doc = await db.get_document(media_type, int(tmdb_id), int(db_index))
+    if not doc:
+        raise HTTPException(status_code=404, detail="That title was not found in your library.")
+
+    is_personal = _is_personal_media(tmdb_id)
+    session = {
+        "tmdb_id": int(tmdb_id),
+        "db_index": int(db_index),
+        "media_type": media_type,
+        "title": doc.get("title") or "",
+        "year": doc.get("release_year") or "",
+        "is_personal": is_personal,
+    }
+
+    if is_personal:
+        #----- Personal: files have no usable metadata, so season/episode come from here
+        season = payload.get("season")
+        episode = payload.get("episode")
+        quality = str(payload.get("quality") or "").strip()
+
+        if media_type == "tv":
+            if season is None or str(season).strip() == "":
+                raise HTTPException(status_code=400, detail="A season number is required for personal TV shows.")
+            try:
+                season = int(season)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Season must be a number.")
+            if episode is not None and str(episode).strip() != "":
+                try:
+                    episode = int(episode)
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail="Episode must be a number.")
+            else:
+                episode = None
+        else:
+            season = None
+            episode = None
+
+        session.update({
+            "kind": "personal",
+            "default_id": None,
+            "season": season,
+            "episode": episode,
+            "quality": quality or None,
+        })
+    else:
+        #----- Real: force the title's own id and let metadata() parse from each file.
+        #----- An optional season is only used as a fallback for files that carry an
+        #----- episode but no season (e.g. absolute-numbered anime).
+        imdb_id = doc.get("imdb_id") or ""
+        default_id = imdb_id if str(imdb_id).startswith("tt") else str(int(tmdb_id))
+
+        season = payload.get("season")
+        if media_type == "tv" and season is not None and str(season).strip() != "":
+            try:
+                season = int(season)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Season must be a number.")
+        else:
+            season = None
+
+        session.update({
+            "kind": "real",
+            "default_id": default_id,
+            "season": season,
+            "episode": None,
+            "quality": None,
+        })
+
+    Backend.MANUAL_SESSION = session
+    return {"status": "success", "session": session}
+
+
+#----- Clear the active manual upload session
+async def clear_manual_session_api() -> dict:
+    Backend.MANUAL_SESSION = None
+    return {"status": "success"}
 
 
 #----- Start a scan or rescan job over the given channels
