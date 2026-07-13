@@ -166,7 +166,7 @@ Forward **all parts** to the channel — they play as one file, in order.
 
 **❓ Why only the `.001 / .002` style?**
 Those numbered volumes are **true byte-splits of one single video** (like what `split`, 7-Zip, or WinRAR create). They *must* be re-joined to play, so the server treats them as one stream.
-Files named like `... Part 1.mkv`, `... CD1.mkv`, `... Disc2.mkv` are **skipped from joining** on purpose — those are usually **separate, standalone videos**, not pieces of one file, so merging them would break playback.
+Files named like `... Part 01.mkv`, `... CD01.mkv`, `... Disc02.mkv` are **skipped from joining** on purpose — those are usually **separate, standalone videos**, not pieces of one file, so merging them would break playback.
 
 ## 🎞️ Combined / Season-Pack Files
 
