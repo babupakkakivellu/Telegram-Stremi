@@ -8,6 +8,7 @@ from pyrogram.errors import FloodWait, ChannelPrivate, ChatAdminRequired
 
 from Backend.logger import LOGGER
 from Backend.helper.encrypt import encode_string, decode_string
+from Backend.helper.manual_add import stamp_caption_with_id
 from Backend.helper.metadata import metadata
 from Backend.helper.pyro import clean_filename, finalize_media_name, get_readable_file_size
 from Backend.helper.split_files import parse_split_info
@@ -494,6 +495,7 @@ class ScanManager:
                 )
             if updated_id:
                 s["counters"]["indexed"] += 1
+                asyncio.create_task(stamp_caption_with_id(message, metadata_info))
             else:
                 s["counters"]["skipped_meta"] += 1
         except Exception as e:
