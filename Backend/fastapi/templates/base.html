@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>{% block title %}Telegram Stremio{% endblock %}</title>
 
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='{{ theme.colors.primary | replace('#','%23') }}'/%3E%3Cpath d='M12.5 9.5l10 6.5-10 6.5z' fill='white'/%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='{{ theme.colors.primary | replace('#','%23') }}'/%3E%3Cpath d='M12.5 9.5l10 6.5-10 6.5z' fill='white'/%3E%3C/svg%3E">
+
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"/>
 
@@ -149,10 +152,11 @@ body::before {
 *::-webkit-scrollbar-thumb { background: var(--hairline-strong); border-radius: 9999px; border: 2px solid transparent; background-clip: padding-box; }
 *::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
+    
 .nav-link {
     color: var(--text-sec);
     border-radius: 9999px;
-    padding: 0.5rem 1.25rem;
+    padding: 0.5rem clamp(0.55rem, 0.9vw, 1.25rem);
     transition: color 0.3s ease;
     position: relative;
     z-index: 1;
@@ -160,17 +164,23 @@ body::before {
     font-weight: 600;
 }
 
-.nav-link:hover, .nav-link.active-page {
+.nav-link.pill-active {
     color: var(--bg) !important; 
 }
 
 #active-pill {
     position: absolute;
+    inset: auto;
     background: var(--primary);
     border-radius: 9999px;
-    transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
     z-index: 0;
     box-shadow: 0 0 15px color-mix(in srgb, var(--primary) 40%, transparent);
+    transition:
+        left 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+        top 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+        width 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+        height 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .toast {
@@ -350,8 +360,11 @@ tailwind.config = {
 
 <div id="overlay" class="fixed inset-0 z-40 opacity-0 pointer-events-none"></div>
 
-<nav id="navbar" class="fixed top-6 left-1/2 -translate-x-1/2 w-[95%] max-w-6xl z-50 glass-panel glass-nav glass-pill px-5 py-3 flex justify-between items-center transition-all duration-300">
-    
+<nav id="navbar"
+  class="fixed top-6 left-1/2 -translate-x-1/2 w-[95%] max-w-6xl z-50
+  glass-panel glass-nav glass-pill px-5 py-3
+  grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-4
+  transition-all duration-300">
     <a href="/" class="flex items-center gap-3 shrink-0">
         <div class="w-8 h-8 rounded-full bg-primary flex items-center justify-center shadow-[0_0_15px_var(--primary)]">
             <i class="fa-solid fa-play text-white text-xs"></i>
@@ -362,20 +375,21 @@ tailwind.config = {
     </a>
 
     {% if current_user %}
-    <div id="nav-container" class="hidden md:flex absolute left-1/2 -translate-x-1/2 items-center gap-1 p-1 bg-black/10 rounded-full border border-hairline">
+    <div id="nav-container" class="hidden md:flex relative isolate min-w-0 justify-self-center items-center gap-1 p-1 bg-black/10 rounded-full border border-hairline">
         <div id="active-pill" class="pointer-events-none"></div>
         <a href="/" class="nav-link">Home</a>
         <a href="/media/manage" class="nav-link">Media</a>
         <a href="/catalogs" class="nav-link">Catalogs</a>
         <a href="/admin/dashboard" class="nav-link">Admin</a>
-        <a href="/admin/subscriptions" class="nav-link">Subs</a>
-        <a href="/admin/access" class="nav-link">Access</a>
+        <a href="/admin/subscriptions" class="nav-link">Plans</a>
+        <a href="/admin/access" class="nav-link">Tokens</a>
+        <a href="/admin/requests" class="nav-link">Requests</a>
         <a href="/admin/tools" class="nav-link">Tools</a>
         <a href="/admin/settings" class="nav-link">Settings</a>
     </div>
     {% endif %}
 
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-3 justify-self-end">
         {% if current_user %}
             <button id="menu-btn" class="md:hidden w-10 h-10 flex items-center justify-center text-xl hover:bg-surface-2 rounded-full transition">
                 <i id="menu-icon" class="fa-solid fa-bars"></i>
@@ -441,8 +455,9 @@ tailwind.config = {
             <a href="/media/manage" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-clapperboard"></i> Media</a>
             <a href="/catalogs" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-layer-group"></i> Catalogs</a>
             <a href="/admin/dashboard" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-chart-line"></i> Admin</a>
-            <a href="/admin/subscriptions" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-credit-card"></i> Subs</a>
-            <a href="/admin/access" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-shield"></i> Access</a>
+            <a href="/admin/subscriptions" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-credit-card"></i> Plans</a>
+            <a href="/admin/access" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-shield"></i> Tokens</a>
+            <a href="/admin/requests" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-inbox"></i> Requests</a>
             <a href="/admin/tools" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-screwdriver-wrench"></i> Tools</a>
             <!-- ↓ NEW -->
             <a href="/admin/settings" class="px-4 py-3 rounded-xl hover:bg-primary hover:text-background transition flex items-center gap-3 font-semibold"><i class="fa-solid fa-gear"></i> Settings</a>
@@ -522,7 +537,7 @@ function checkOverlay() {
     }
 }
 
-function showToast(message, type = 'info', title = '') {
+function showToast(message, type = 'info', title = '', duration = 2600) {
     const container = document.getElementById('toast-container');
     if (!container) return;
 
@@ -550,7 +565,7 @@ function showToast(message, type = 'info', title = '') {
         setTimeout(() => {
             if (toast.parentNode) toast.parentNode.removeChild(toast);
         }, 200);
-    }, 2600);
+    }, duration);
 }
 
 function escapeHtml(str) {
@@ -612,15 +627,13 @@ function movePill(el) {
     pill.style.height = r.height + "px";
     pill.style.left = (r.left - pr.left) + "px";
     pill.style.top = (r.top - pr.top) + "px";
+    links.forEach(l => l.classList.toggle("pill-active", l === el));
 }
 
 window.addEventListener('load', () => {
     const current = window.location.pathname;
     activeLink = [...links].find(l => l.getAttribute("href") === current) || links[0];
-    if(activeLink) {
-        activeLink.classList.add('active-page');
-        movePill(activeLink);
-    }
+    if(activeLink) movePill(activeLink);
 });
 
 links.forEach(l => {
@@ -632,6 +645,28 @@ if(navContainer) {
         if(activeLink) movePill(activeLink);
     });
 }
+
+{% if current_user %}
+/* Remind the admin that a manual upload session is active (except on Tools) */
+(function manualSessionReminder() {
+    if (window.location.pathname === '/admin/tools') return;
+    async function check() {
+        try {
+            const res = await fetch('/api/admin/tools/manual-session');
+            if (!res.ok) return;
+            const data = await res.json();
+            const s = data.session;
+            if (s && s.tmdb_id !== undefined && s.tmdb_id !== null) {
+                const label = s.title ? `"${s.title}"` : 'a title';
+                showToast(`Uploads are being added to ${label}. Open Tools to stop it if you're done.`,
+                          'error', '⚠ Upload session active', 5000);
+            }
+        } catch (e) { /* ignore */ }
+    }
+    check();
+    setInterval(check, 60000);
+})();
+{% endif %}
 </script>
 
 </body>
